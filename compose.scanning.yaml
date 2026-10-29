@@ -1,0 +1,8 @@
+# Compatibility override: real scanning is now enabled in compose.yaml.
+services:
+  api:
+    environment:
+      SCAN_PROVIDER: clamav
+  worker:
+    environment:
+      SCAN_PROVIDER: clamav

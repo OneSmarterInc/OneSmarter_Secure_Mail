@@ -1,0 +1,486 @@
+import hashlib
+import http.client
+import json
+import os
+import secrets
+import ssl
+import subprocess
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from argon2 import PasswordHasher
+from cryptography import x509
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+from backend.keyservice import protocol as p
+from backend.keyservice.client import Client, ServiceUnavailable
+from backend.keyservice.server import Server, Service, strict_json, tls_context
+from backend.keyservice.store import ConflictError, KeyStore, SealedError
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_KEY_PORTAL_BROWSER") != "1", reason="Opt-in local Edge browser check"
+)
+def test_custodian_browser(live_service):
+    live = live_service
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["node", str(root / "scripts/check_key_portal.mjs")],
+        input=json.dumps(
+            {
+                "origin": live["origin"],
+                "cert": str(live["certs"]["custodian"][0]),
+                "key": str(live["certs"]["custodian"][1]),
+                "password": live["password"],
+                "secret": p.encode(live["secret"]),
+                "screenshot": str(root / ".runtime/key-custody.png"),
+            }
+        ),
+        text=True,
+        capture_output=True,
+        timeout=90,
+        cwd=root,
+    )
+    assert result.returncode == 0, result.stderr
+    assert live["store"].status()["sealed"] is True
+
+
+@pytest.fixture
+def vault(tmp_path):
+    secret = secrets.token_bytes(32)
+    store = KeyStore.initialize(tmp_path / "vault.sqlite3", secret)
+    return store, secret
+
+
+def provision(store):
+    org = str(uuid.uuid4())
+    key = store.rotate(org, None, str(uuid.uuid4()), "test-custodian")
+    context = f"secure-mail:v1:organization={org}:document=sara"
+    return org, key, context
+
+
+def test_sealed_start_wrong_secret_recovery_and_no_disk_plaintext(vault):
+    store, secret = vault
+    assert store.status()["sealed"]
+    with pytest.raises(InvalidTag):
+        store.unseal(secrets.token_bytes(32), "custodian")
+    with pytest.raises(SealedError):
+        store.list_versions(str(uuid.uuid4()))
+    store.unseal(secret, "custodian")
+    org, key, context = provision(store)
+    dek = secrets.token_bytes(32)
+    envelope = store.wrap(org, context, dek, key["id"], "workload")
+    assert store.unwrap(org, context, envelope, "workload") == dek
+    root = store.root
+    for path in store.path.parent.glob("vault.sqlite3*"):
+        content = path.read_bytes()
+        assert root not in content and secret not in content and dek not in content
+    restarted = KeyStore(store.path)
+    assert restarted.status()["sealed"]
+    restarted.unseal(secret, "custodian")
+    assert restarted.unwrap(org, context, envelope, "workload") == dek
+    restarted.seal("custodian")
+    with pytest.raises(SealedError):
+        restarted.unwrap(org, context, envelope, "workload")
+
+
+def test_rotation_idempotency_conflicts_and_concurrent_reads(vault):
+    store, secret = vault
+    store.unseal(secret, "custodian")
+    org, old, context = provision(store)
+    dek = secrets.token_bytes(32)
+    envelope = store.wrap(org, context, dek, old["id"], "worker")
+    request_id = str(uuid.uuid4())
+
+    def rotate():
+        return store.rotate(org, old["id"], request_id, "maintenance")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: rotate(), range(8)))
+        assert len({result["id"] for result in results}) == 1
+        assert all(
+            item == dek
+            for item in pool.map(
+                lambda _: store.unwrap(org, context, envelope, "worker"), range(20)
+            )
+        )
+    new = results[0]
+    with pytest.raises(ConflictError):
+        store.rotate(org, old["id"], str(uuid.uuid4()), "maintenance")
+    with pytest.raises(ConflictError):
+        store.rotate(str(uuid.uuid4()), None, request_id, "maintenance")
+    replacement = store.rewrap(org, context, envelope, new["id"], "maintenance")
+    assert store.unwrap(org, context, replacement, "worker") == dek
+    assert replacement["key_id"] == new["id"]
+    with pytest.raises(ConflictError):
+        store.wrap(org, context, dek, old["id"], "worker")
+
+
+def test_atomic_root_rotation_failure_and_actual_backup_restore(vault, tmp_path, monkeypatch):
+    import backend.keyservice.store as module
+
+    store, secret = vault
+    store.unseal(secret, "custodian")
+    org, key, context = provision(store)
+    dek = secrets.token_bytes(32)
+    envelope = store.wrap(org, context, dek, key["id"], "worker")
+    backup = tmp_path / "backup.sqlite3"
+    store.backup(backup)
+    old_id = store.root_id
+    original = module.protect
+    count = 0
+
+    def interrupted(*args):
+        nonlocal count
+        count += 1
+        if count == 2:
+            raise OSError("Injected failure after record re-protection, before root commit")
+        return original(*args)
+
+    monkeypatch.setattr(module, "protect", interrupted)
+    with pytest.raises(OSError):
+        store.rotate_root(secrets.token_bytes(32), old_id, "custodian")
+    assert store.root_id == old_id
+    store.seal("custodian")
+    store.unseal(secret, "custodian")
+    assert store.unwrap(org, context, envelope, "worker") == dek
+    monkeypatch.setattr(module, "protect", original)
+    replacement_secret = secrets.token_bytes(32)
+    store.rotate_root(replacement_secret, old_id, "custodian")
+    store.seal("custodian")
+    with pytest.raises(InvalidTag):
+        store.unseal(secret, "custodian")
+    store.unseal(replacement_secret, "custodian")
+    assert store.unwrap(org, context, envelope, "worker") == dek
+    restored = KeyStore(backup)
+    restored.unseal(secret, "recovery-custodian")
+    assert restored.unwrap(org, context, envelope, "worker") == dek
+
+
+@pytest.mark.parametrize("field", ["kem", "ephemeral", "wrap_nonce", "key", "suite", "v"])
+def test_malformed_and_cross_scope_envelopes(vault, field):
+    store, secret = vault
+    store.unseal(secret, "custodian")
+    org, key, context = provision(store)
+    wrapper = store.wrap(org, context, secrets.token_bytes(32), key["id"], "worker")
+    with pytest.raises(ValueError):
+        store.unwrap(str(uuid.uuid4()), context, wrapper, "worker")
+    with pytest.raises(InvalidTag):
+        store.unwrap(org, context + "-other", wrapper, "worker")
+    wrapper[field] = "unsupported"
+    with pytest.raises(ValueError):
+        store.unwrap(org, context, wrapper, "worker")
+
+
+def certificates(tmp_path):
+    now = datetime.now(timezone.utc)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Synthetic key-service test CA")])
+    ca = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False
+        )
+        .add_extension(
+            x509.KeyUsage(True, False, False, False, False, True, True, False, False), critical=True
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_path = tmp_path / "ca.pem"
+    ca_path.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    result = {"ca": ca_path}
+    for label in ["server", "custodian", "workload", "maintenance"]:
+        key = ec.generate_private_key(ec.SECP256R1())
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, label)]))
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(days=1))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+                critical=False,
+            )
+            .add_extension(
+                x509.KeyUsage(True, False, False, False, False, False, False, False, False),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage(
+                    [
+                        ExtendedKeyUsageOID.SERVER_AUTH
+                        if label == "server"
+                        else ExtendedKeyUsageOID.CLIENT_AUTH
+                    ]
+                ),
+                critical=False,
+            )
+        )
+        if label == "server":
+            builder = builder.add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False
+            )
+        cert = builder.sign(ca_key, hashes.SHA256())
+        cert_path, key_path = tmp_path / f"{label}.pem", tmp_path / f"{label}.key"
+        cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        key_path.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        result[label] = (
+            cert_path,
+            key_path,
+            hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest(),
+        )
+    return result
+
+
+@pytest.fixture
+def live_service(vault, tmp_path, settings):
+    require_pq = os.environ.get("RUN_PQ_TRANSPORT") == "1"
+    settings.PQ_TRANSPORT_REQUIRED = require_pq
+    store, secret = vault
+    certs = certificates(tmp_path)
+    org = str(uuid.uuid4())
+    password = secrets.token_urlsafe(24)
+    identities = {
+        certs["custodian"][2]: {
+            "name": "custodian",
+            "role": "custodian",
+            "expires_at": time.time() + 3600,
+            "operations": ["custody-status", "unseal", "seal", "rotate-root"],
+            "password_hash": PasswordHasher().hash(password),
+            "organizations": [],
+        },
+        certs["workload"][2]: {
+            "name": "web",
+            "role": "workload",
+            "expires_at": time.time() + 3600,
+            "operations": ["status", "versions", "wrap", "unwrap", "rewrap"],
+            "organizations": [org],
+        },
+        certs["maintenance"][2]: {
+            "name": "maintenance",
+            "role": "maintenance",
+            "expires_at": time.time() + 3600,
+            "operations": ["versions", "rotate", "import"],
+            "organizations": [org],
+        },
+    }
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps({"identities": identities}))
+    service = Service(store, policy, "https://localhost:8443")
+    server = Server(
+        ("127.0.0.1", 0),
+        service,
+        tls_context(str(certs["server"][0]), str(certs["server"][1]), str(certs["ca"])),
+        require_pq=require_pq,
+    )
+    origin = f"https://localhost:{server.server_port}"
+    service.origin = origin
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield {
+        "store": store,
+        "secret": secret,
+        "certs": certs,
+        "org": org,
+        "password": password,
+        "origin": origin,
+        "port": server.server_port,
+        "policy": policy,
+        "service": service,
+        "require_pq": require_pq,
+    }
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+def client(live, role):
+    return Client(
+        live["origin"],
+        str(live["certs"]["ca"]),
+        str(live["certs"][role][0]),
+        str(live["certs"][role][1]),
+        require_pq=live["require_pq"],
+    )
+
+
+def test_readiness_tracks_live_seal_state(live_service, monkeypatch):
+    from backend.apps.core import document_service
+
+    live = live_service
+    monkeypatch.setattr(
+        document_service, "read_status", lambda: client(live, "workload").call("status")
+    )
+    assert not document_service.ready()
+    live["store"].unseal(live["secret"], "test-custodian")
+    assert document_service.ready()
+    live["store"].seal("test-custodian")
+    assert not document_service.ready()
+
+
+def portal_request(live, path, data=None, cookie="", csrf="", origin=None, role="custodian"):
+    tls = client(live, role).tls
+    conn = http.client.HTTPSConnection("localhost", live["port"], context=tls, timeout=5)
+    try:
+        conn.request(
+            "GET" if data is None else "POST",
+            path,
+            body=None if data is None else p.canonical(data),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": origin or live["origin"],
+                "Cookie": cookie,
+                "X-CSRFToken": csrf,
+            },
+        )
+        response = conn.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        conn.close()
+
+
+def test_real_https_portal_authentication_unseal_and_runtime_boundary(live_service):
+    live = live_service
+    assert client(live, "workload").call("status")["sealed"]
+    status, headers, html = portal_request(live, "/")
+    assert status == 200 and b"Custodian sign in" in html
+    assert headers["Cache-Control"] == "no-store"
+    assert portal_request(live, "/", role="workload")[0] == 403
+    assert portal_request(live, "/v1/unseal", {"secret": p.encode(live["secret"])})[0] == 403
+    status, headers, body = portal_request(
+        live, "/login", {"username": "custodian", "password": live["password"]}
+    )
+    assert status == 200
+    cookie, csrf = headers["Set-Cookie"].split(";")[0], json.loads(body)["csrf"]
+    assert "Secure" in headers["Set-Cookie"] and "HttpOnly" in headers["Set-Cookie"]
+    secret = {"secret": p.encode(live["secret"])}
+    assert (
+        portal_request(live, "/v1/unseal", secret, cookie, csrf, origin="https://evil.test")[0]
+        == 403
+    )
+    assert portal_request(live, "/v1/unseal", secret, cookie, "wrong")[0] == 403
+    assert portal_request(live, "/v1/unseal", secret, cookie, csrf)[0] == 200
+    runtime, maintenance = client(live, "workload"), client(live, "maintenance")
+    with pytest.raises(ServiceUnavailable):
+        runtime.call(
+            "rotate", organization=live["org"], expected=None, request_id=str(uuid.uuid4())
+        )
+    key = maintenance.call(
+        "rotate", organization=live["org"], expected=None, request_id=str(uuid.uuid4())
+    )
+    context = f"secure-mail:v1:organization={live['org']}:document=sara"
+    dek = secrets.token_bytes(32)
+    wrapper = runtime.call(
+        "wrap", organization=live["org"], context=context, dek=p.encode(dek), expected=key["id"]
+    )
+    assert runtime.call("unwrap", organization=live["org"], context=context, wrapper=wrapper)[
+        "dek"
+    ] == p.encode(dek)
+    with pytest.raises(ServiceUnavailable):
+        runtime.call("versions", organization=str(uuid.uuid4()))
+    assert portal_request(live, "/v1/seal", {}, cookie, csrf)[0] == 200
+    with pytest.raises(ServiceUnavailable):
+        runtime.call("unwrap", organization=live["org"], context=context, wrapper=wrapper)
+    # Policy revocation invalidates an existing authenticated maintenance session.
+    live["policy"].write_text('{"identities":{}}')
+    assert portal_request(live, "/v1/unseal", secret, cookie, csrf)[0] == 403
+
+
+def test_no_client_certificate_cannot_connect(live_service):
+    live = live_service
+    tls = ssl.create_default_context(cafile=str(live["certs"]["ca"]))
+    conn = http.client.HTTPSConnection("localhost", live["port"], context=tls, timeout=5)
+    with pytest.raises((ssl.SSLError, OSError, http.client.HTTPException)):
+        conn.request("GET", "/")
+        conn.getresponse()
+    conn.close()
+
+
+@pytest.mark.parametrize("raw", [b"[]", b'{"x":1,"x":2}', b'{"x":NaN}'])
+def test_strict_wire_json(raw):
+    with pytest.raises(ValueError):
+        strict_json(raw)
+
+
+@pytest.mark.django_db
+def test_django_service_integration_and_local_import(live_service, settings, monkeypatch, org):
+    from backend.apps.core import crypto, keyring
+    from backend.apps.core.models import WrappingKeyVersion
+
+    live = live_service
+    ctx = crypto.context(org.pk, "document", "sara")
+    original = crypto.encrypt(b"Retained synthetic document", ctx)
+    local = WrappingKeyVersion.objects.get(organization=org)
+    pq, classical = keyring.private_keys(local)
+    live["store"].unseal(live["secret"], "test-custodian")
+    policy = json.loads(live["policy"].read_text())
+    for entry in policy["identities"].values():
+        if entry["role"] != "custodian":
+            entry["organizations"].append(str(org.pk))
+    live["policy"].write_text(json.dumps(policy))
+    maintenance = client(live, "maintenance")
+    maintenance.call(
+        "import",
+        organization=str(org.pk),
+        key_id=str(local.pk),
+        private=p.encode(pq.private_bytes_raw() + classical.private_bytes_raw()),
+    )
+    settings.KEY_PROTECTOR = "key-service"
+    settings.KEY_SERVICE_URL = live["origin"]
+    settings.KEY_SERVICE_CA = str(live["certs"]["ca"])
+    settings.KEY_SERVICE_CERT = str(live["certs"]["maintenance"][0])
+    settings.KEY_SERVICE_KEY = str(live["certs"]["maintenance"][1])
+    new = keyring.rotate(org)
+    settings.KEY_SERVICE_CERT = str(live["certs"]["workload"][0])
+    settings.KEY_SERVICE_KEY = str(live["certs"]["workload"][1])
+
+    def forbidden(*args):
+        raise AssertionError("Web process must not recover persistent private keys")
+
+    monkeypatch.setattr(keyring, "private_keys", forbidden)
+    assert crypto.decrypt(original, ctx) == b"Retained synthetic document"
+    value = crypto.encrypt(b"New synthetic document", ctx)
+    assert crypto.decrypt(value, ctx) == b"New synthetic document"
+    changed = json.loads(crypto.rewrap(original, ctx))
+    assert changed["key_id"] == str(new.pk)
+    assert changed["data"] == json.loads(original)["data"]
+    assert crypto.decrypt(json.dumps(changed), ctx) == b"Retained synthetic document"
+    assert json.loads(new.private_ciphertext)["provider"] == "key-service"
+    # A sealed service must not cause Django to use local private keys or create
+    # a weaker envelope. Unsealing restores reads of exactly the same ciphertext.
+    live["store"].seal("test-custodian")
+    with pytest.raises(crypto.CryptoUnavailable):
+        crypto.decrypt(value, ctx)
+    with pytest.raises(crypto.CryptoUnavailable):
+        crypto.encrypt(b"Must not be stored without key protection", ctx)
+    with pytest.raises(crypto.CryptoUnavailable):
+        crypto.rewrap(value, ctx)
+    live["store"].unseal(live["secret"], "test-custodian")
+    assert crypto.decrypt(value, ctx) == b"New synthetic document"

@@ -1,0 +1,140 @@
+from django.conf import settings
+from django.db import transaction
+from django.db.models import Count
+from django.utils import timezone
+from rest_framework.response import Response
+
+from . import document_service, storage
+from .auth import recent_mfa
+from .http import Problem, endpoint, unavailable
+from .mail import payload
+from .models import Conversation, DeliveryJob
+from .services import audit, current_staff, lock_organization, rate_limit
+
+
+@endpoint(["GET"])
+def health(request):
+    return Response({"status": "ok"})
+
+
+@endpoint(["GET"])
+def document_service_status(request):
+    ready = document_service.ready()
+    response = Response({"ready": ready, "message": "" if ready else "Service is disabled."})
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+@endpoint(["GET"], staff=True)
+def dashboard(request):
+    query = Conversation.objects.filter(owner=request.user, organization=request.user.organization)
+    return Response(
+        {
+            "conversations": query.count(),
+            "awaiting": query.filter(state="awaiting_recipient", revoked_at=None).count(),
+            "replied": query.filter(state="replied").count(),
+            "active": query.filter(
+                revoked_at=None, expires_at__gt=timezone.now(), protected=True
+            ).count(),
+            "delivery_attention": DeliveryJob.objects.filter(
+                organization=request.user.organization,
+                actor=request.user,
+                state__in=["failed", "uncertain"],
+            ).count(),
+        }
+    )
+
+
+@endpoint(["GET"], staff=True)
+def connection_settings(request):
+    jobs = DeliveryJob.objects.filter(organization=request.user.organization, actor=request.user)
+    counts = dict(jobs.values_list("state").annotate(total=Count("pk")))
+    return Response(
+        {
+            "checked_at": timezone.now().isoformat(),
+            "delivery_counts": counts,
+            "can_manage_accounts": request.user.role == "admin",
+            "can_manage_senders": request.user.role == "admin"
+            and request.user.can_manage_privileges,
+            "key_protector": settings.KEY_PROTECTOR,
+            "max_upload_bytes": settings.MAX_UPLOAD_BYTES,
+            "signature_max_age_hours": settings.CLAMAV_MAX_SIGNATURE_AGE_HOURS,
+            "environment": settings.ENVIRONMENT,
+            "synthetic_mode": settings.SYNTHETIC_MODE,
+            "mail": settings.MAIL_PROVIDER,
+            "storage": settings.STORAGE_PROVIDER,
+            "scanner": settings.SCAN_PROVIDER,
+            "smtp_configured": bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD),
+            "archive_configured": bool(settings.AUDIT_BUCKET),
+            "crypto": settings.CRYPTO_PROVIDER,
+            "production_ready": False,
+            "gates": [
+                "Independent review of OneSmarter key management",
+                "Validated post-quantum architecture",
+                "Approved retention and AWS region",
+                "AWS Object Lock and key recovery evidence",
+                "PostgreSQL concurrency and complete delivery verification",
+            ],
+            "sender_addresses": request.user.sender_addresses,
+        }
+    )
+
+
+@endpoint(["POST"], staff=True)
+def check_connections(request):
+    rate_limit(request, "scanner_health", str(request.user.pk), maximum=6, seconds=60)
+    try:
+        scanner = {"status": "healthy", **storage.scanner_health()}
+    except (OSError, ValueError):
+        scanner = {"status": "unavailable"}
+    return Response({"checked_at": timezone.now().isoformat(), "scanner": scanner})
+
+
+@endpoint(["POST"], staff=True)
+def retry_delivery(request, ident):
+    recent_mfa(request)
+    if request.data.get("acknowledge_duplicate_risk") is not True:
+        raise Problem("Confirm that retrying may send a duplicate notification.")
+    with transaction.atomic():
+        lock_organization(request.user.organization_id)
+        current_staff(request)
+        job = (
+            DeliveryJob.objects.select_for_update()
+            .filter(pk=ident, organization=request.user.organization, actor=request.user)
+            .first()
+        )
+        if not job:
+            unavailable()
+        if job.state not in {"failed", "uncertain"} or not job.payload_ciphertext:
+            raise Problem(
+                "This notification cannot be retried. Create a fresh invitation if its secret expired."
+            )
+        job.state, job.next_attempt = "retry", timezone.now()
+        job.save()
+        audit(
+            request.user.organization, request.user, "delivery.retry_requested", "delivery", job.pk
+        )
+    return Response({"queued": True})
+
+
+@endpoint(["GET"])
+def development_inbox(request):
+    if (
+        not settings.SYNTHETIC_MODE
+        or not settings.ENABLE_DEV_TOOLS
+        or settings.MAIL_PROVIDER != "development"
+        or request.META.get("REMOTE_ADDR") not in {"127.0.0.1", "::1"}
+    ):
+        unavailable()
+    # Deliberately accessible only in loopback synthetic mode, like a local mail catcher.
+    jobs = (
+        DeliveryJob.objects.filter(state="development_delivered")
+        .exclude(payload_ciphertext="")
+        .order_by("-created_at")[:50]
+    )
+    return Response(
+        {
+            "results": [{"id": str(j.pk), "created_at": j.created_at, **payload(j)} for j in jobs],
+            "synthetic_only": True,
+        }
+    )

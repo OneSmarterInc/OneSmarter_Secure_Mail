@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OneSmarter · Key custody</title><link rel="stylesheet" href="./portal.css"><script defer src="./portal.js"></script></head>
+<body><main>
+<p class="brand">OneSmarter · Restricted maintenance</p>
+<h1>Key custody</h1>
+<p>This page controls the document key service. It does not grant access to conversations.</p>
+<p class="notice">Synthetic deployment only until independent review, transport validation and recovery approval are complete.</p>
+<p id="feedback" role="status" aria-live="polite"></p>
+<section id="signin"><h2>Custodian sign in</h2>
+<p>A separate custodian login is required. Staff portal credentials do not apply. The maintenance connection uses a dedicated client certificate, supplied by the browser or the configured maintenance gateway.</p>
+<form id="login"><label for="username">Custodian username</label><input id="username" name="username" autocomplete="username" required maxlength="100">
+<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+<button type="submit">Sign in</button></form></section>
+<section id="controls" hidden>
+<div class="state"><h2>Service status</h2><strong id="state">Checking…</strong></div>
+<p id="root-version"></p><p>Documents remain encrypted in storage. Unsealing permits authorized key operations; restarting the service seals it again.</p>
+<form id="unseal"><label for="recovery">Recovery key</label><input id="recovery" type="password" autocomplete="off" spellcheck="false" required maxlength="44" minlength="44">
+<p class="hint">Enter the separately stored Base64 recovery key. It is used temporarily, never saved in browser storage or sent to application logs.</p>
+<button type="submit">Unseal key service</button></form>
+<form id="seal"><label class="check"><input id="seal-confirm" type="checkbox" required> I understand document operations will become unavailable until another unseal.</label><button class="danger" type="submit">Seal key service</button></form>
+<details><summary>Rotate root protection</summary><p>Take and verify an encrypted key-store backup first. Keep its old recovery key separately: an old backup still needs the old key. This operation does not re-encrypt documents.</p>
+<form id="rotate"><label for="new-secret">New randomly generated recovery key</label><input id="new-secret" type="password" autocomplete="off" required minlength="44" maxlength="44">
+<label for="confirm-secret">Confirm new recovery key</label><input id="confirm-secret" type="password" autocomplete="off" required minlength="44" maxlength="44">
+<label class="check"><input id="backup-confirm" type="checkbox" required> I have verified the backup and separately saved the new recovery key.</label><button type="submit">Rotate root protection</button></form></details>
+<button id="logout" class="secondary" type="button">Sign out of maintenance</button><p class="hint">Signing out does not seal the running service. Maintenance sessions expire after five minutes.</p>
+</section></main></body></html>

@@ -1,0 +1,108 @@
+name: onesmarter-secure-mail
+
+x-app: &app
+  build: .
+  environment: &environment
+    APP_ENV: development
+    POSTGRES_HOST: db
+    POSTGRES_DB: secure_mail
+    POSTGRES_USER: secure_mail
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/init_compose.py first}
+    REDIS_URL: redis://redis:6379/0
+    PUBLIC_URL: http://localhost:8080
+    CSRF_TRUSTED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+    MAIL_PROVIDER: development
+    SCAN_PROVIDER: clamav
+    CLAMAV_TRANSPORT: unix
+    CLAMAV_SOCKET: /run/clamav/clamd.sock
+    CLAMAV_MAX_SIGNATURE_AGE_HOURS: "48"
+  volumes:
+    - runtime:/app/.runtime
+    - clamav_socket:/run/clamav:ro
+  restart: unless-stopped
+
+services:
+  clamav:
+    image: clamav/clamav:1.4
+    environment:
+      TZ: UTC
+      FRESHCLAM_CHECKS: "12"
+    volumes:
+      - clamav_signatures:/var/lib/clamav
+      - clamav_socket:/tmp
+      - ./deploy/clamd.conf:/etc/clamav/clamd.conf:ro
+    mem_limit: 4g
+    cpus: 2
+    pids_limit: 128
+    restart: unless-stopped
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: secure_mail
+      POSTGRES_USER: secure_mail
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/init_compose.py first}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U secure_mail -d secure_mail']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --appendonly, 'yes']
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  init:
+    <<: *app
+    command: [python, scripts/container_init.py]
+    restart: 'no'
+    depends_on:
+      db: {condition: service_healthy}
+  api:
+    <<: *app
+    ports:
+      - '127.0.0.1:8080:8080'
+    depends_on:
+      init: {condition: service_completed_successfully}
+      clamav: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  frontend:
+    build: ./frontend
+    # Loopback proxy keeps the synthetic mailbox and setup inaccessible off-host.
+    network_mode: service:api
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+  worker:
+    <<: *app
+    command: [celery, -A, backend.config.celery, worker, --loglevel=INFO, --concurrency=2]
+    depends_on:
+      init: {condition: service_completed_successfully}
+      clamav: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  beat:
+    <<: *app
+    command: [celery, -A, backend.config.celery, beat, --loglevel=INFO, --schedule=/app/.runtime/celerybeat]
+    depends_on:
+      init: {condition: service_completed_successfully}
+      clamav: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+volumes:
+  clamav_socket:
+  clamav_signatures:
+  database:
+  runtime:
+  redis:
