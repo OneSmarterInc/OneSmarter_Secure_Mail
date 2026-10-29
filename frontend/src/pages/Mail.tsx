@@ -118,8 +118,8 @@ export function MailList() {
             <label className="search">
               <Icon name="search" size={18} />
               <input
-                aria-label="Search recipient or status"
-                placeholder="Search recipient or status"
+                aria-label="Search subject, recipient or status"
+                placeholder="Search subject, recipient or status"
                 value={q}
                 onChange={(e) => {
                   setQ(e.target.value);
@@ -153,7 +153,11 @@ export function MailList() {
                   <div>
                     <strong>{c.subject}</strong>
                     {c.unread && (
-                      <span className="unread-dot" aria-label="Unread" />
+                      <span
+                        className="unread-dot"
+                        role="img"
+                        aria-label="Unread"
+                      />
                     )}
                   </div>
                   <p>{c.recipients.map((r) => r.email).join(", ")}</p>
@@ -267,12 +271,35 @@ function Addresses({
           type="text"
           value={draft}
           placeholder={values.length ? "Add another…" : "recipient@example.com"}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={add}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            e.target.setCustomValidity(
+              e.target.value.trim()
+                ? "Add or correct this address before sending."
+                : "",
+            );
+          }}
+          onBlur={(e) => {
+            const valid = !draft
+              .split(/[;,\s]+/)
+              .filter(Boolean)
+              .some((v) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v));
+            add();
+            e.target.setCustomValidity(
+              valid ? "" : "Enter complete email addresses.",
+            );
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === "," || e.key === ";") {
               e.preventDefault();
               add();
+              const valid = !draft
+                .split(/[;,\s]+/)
+                .filter(Boolean)
+                .some((v) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v));
+              e.currentTarget.setCustomValidity(
+                valid ? "" : "Enter complete email addresses.",
+              );
             }
           }}
           aria-invalid={!!error}
@@ -302,6 +329,9 @@ export function Compose({
   const [sender, setSender] = useState(user.sender_addresses[0] ?? "");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [nophi, setNophi] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [routeSignature, setRouteSignature] = useState("");
   const [expiry, setExpiry] = useState(7);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -324,10 +354,14 @@ export function Compose({
     body,
     expiry_days: expiry,
     attachments: files.map((f) => f.id),
+    nophi_override: nophi,
+    nophi_acknowledged: acknowledged,
     mode: requestMode ? "secure_request" : "ordinary",
   };
   const signature = JSON.stringify(payload);
   const debounced = useDebounced(signature);
+  const routeFresh =
+    !!route && routeSignature === signature && debounced === signature;
   useEffect(() => {
     const controller = new AbortController();
     setRouteError("");
@@ -343,7 +377,10 @@ export function Compose({
       signal: controller.signal,
     })
       .then((value) => {
-        if (!controller.signal.aborted) setRoute(value);
+        if (!controller.signal.aborted) {
+          setRoute(value);
+          setRouteSignature(debounced);
+        }
       })
       .catch((err: unknown) => {
         if (!controller.signal.aborted) {
@@ -359,6 +396,10 @@ export function Compose({
       setError("Service is disabled.");
       return;
     }
+    if (!routeFresh || (nophi && !acknowledged)) {
+      setError("Review the current delivery route before sending.");
+      return;
+    }
     setBusy(true);
     setError("");
     if (submission.current.signature !== signature)
@@ -366,7 +407,7 @@ export function Compose({
     try {
       const result = await post<{ id: string }>(
         "/conversations",
-        payload,
+        { ...payload, expected_route: route },
         submission.current.key,
       );
       window.location.hash = "/messages/" + result.id;
@@ -434,6 +475,38 @@ export function Compose({
               required={!requestMode}
             />
           </label>
+          {!requestMode && (
+            <div className="stack">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={nophi}
+                  disabled={!user.can_nophi}
+                  onChange={(e) => {
+                    setNophi(e.target.checked);
+                    setAcknowledged(false);
+                  }}
+                />
+                Use Nophi: send as normal email
+              </label>
+              <small>
+                {user.can_nophi
+                  ? "A word in the subject alone never activates the override."
+                  : "Your account does not have permission to use Nophi."}
+              </small>
+              {nophi && (
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={acknowledged}
+                    onChange={(e) => setAcknowledged(e.target.checked)}
+                  />
+                  I understand that the content and attachments will be emailed
+                  and cannot be recalled through the portal.
+                </label>
+              )}
+            </div>
+          )}
           <label>
             {requestMode ? "Instructions (optional)" : "Message"}
             <textarea
@@ -466,7 +539,13 @@ export function Compose({
             <button
               className="primary"
               disabled={
-                !serviceReady || busy || uploading || !to.length || !!routeError
+                !serviceReady ||
+                !routeFresh ||
+                (nophi && !acknowledged) ||
+                busy ||
+                uploading ||
+                !to.length ||
+                !!routeError
               }
             >
               {busy
@@ -498,11 +577,15 @@ export function Compose({
             <div className="route-preview">
               <small>DELIVERY ROUTE</small>
               <strong>
-                {route?.protected === false
-                  ? "Normal email"
-                  : route?.protected
-                    ? "Protected portal"
-                    : "Complete message details"}
+                {!routeFresh
+                  ? "Checking delivery route…"
+                  : route?.protected === false
+                    ? route.reason === "explicit_nophi_override"
+                      ? "Normal email: Nophi override"
+                      : "Normal email"
+                    : route?.protected
+                      ? "Protected portal"
+                      : "Complete message details"}
               </strong>
               <small>
                 {route?.reason === "explicit_nophi_override"
@@ -600,14 +683,21 @@ export function ReplyForm({
   conversation,
   recipientMode = false,
   onSent,
+  draft,
+  onDraftChange,
 }: {
   conversation: Conversation;
   recipientMode?: boolean;
   onSent: () => void;
+  draft?: { body: string; files: FileItem[] };
+  onDraftChange?: (value: { body: string; files: FileItem[] }) => void;
 }) {
   const serviceReady = useDocumentService();
-  const [body, setBody] = useState("");
-  const [files, setFiles] = useState<FileItem[]>([]);
+  const [body, setBody] = useState(draft?.body ?? "");
+  const [files, setFiles] = useState<FileItem[]>(draft?.files ?? []);
+  useEffect(() => {
+    onDraftChange?.({ body, files });
+  }, [body, files, onDraftChange]);
   const [audience, setAudience] = useState("");
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -688,6 +778,7 @@ export function ReplyForm({
       <label>
         Message
         <textarea
+          aria-label="Message"
           value={body}
           onChange={(e) => setBody(e.target.value)}
           rows={4}
@@ -739,13 +830,20 @@ export function MailDetail({ id }: { id: string }) {
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const revokeKey = useRef({ target: "", key: crypto.randomUUID() });
   async function revokeAccess() {
+    if (revokeKey.current.target !== revokeTarget)
+      revokeKey.current = {
+        target: revokeTarget || "",
+        key: crypto.randomUUID(),
+      };
     setBusy(true);
     setError("");
     try {
       await post(
         `/conversations/${id}/revoke`,
         revokeTarget === "all" ? {} : { grant_id: revokeTarget },
+        revokeKey.current.key,
       );
       setRevokeTarget(null);
       setRefresh((v) => v + 1);

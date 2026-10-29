@@ -101,3 +101,58 @@ The user authorized enabling the saved Private Email SMTP profile and resending 
 Protected/account notifications now include escaped branded HTML and a plain-text alternative. Ordinary-email behavior is preserved. 28 template/workflow tests passed, including unsafe-link rejection, HTML escaping and confidential subject/body exclusion. Local desktop/mobile previews were rendered; Gmail/Outlook rendering of the new template remains unverified. The SMTP worker was reloaded for future notifications; no extra test email was sent.
 
 Read-only inspection of the current local dataset authenticated 2 encrypted subjects, 3 message bodies, 2 filenames, 2 file objects and 5 retained outbox payloads. All 14 used the v2 ML-KEM-768/X25519/AES-256-GCM envelope; altered in-memory copies were rejected. No plaintext, keys or live invitation links were printed or written by the inspection. Metadata such as addresses, timestamps and file sizes remains readable; this is field/object encryption, not whole-database encryption. Local root-key custody on the same machine is not production custody approval.
+
+## Proxy/token-bucket regression (29 October 2026)
+
+`pytest backend/tests/test_rate_limits.py backend/tests/test_proxy_integration.py`
+checks refill/capacity/clock rollback, per-account isolation, trusted-peer parsing,
+malformed and forged headers, and real login responses. The nginx integration
+uses the shipped preview proxy configuration and a disposable Django live server,
+with separate loopback source IPs. It verifies forged headers cannot replenish
+anonymous limits and another client/account retains its allowance. CI installs
+nginx and sets `REQUIRE_NGINX_TEST=1`, making missing nginx a failure there.
+Locally, 43 focused/authentication/portal tests passed and the one actual-nginx
+test was skipped because nginx is unavailable. CI execution remains pending.
+
+The broader token-bucket run produced 161 passes, 13 skips and three local
+key-service connection failures under the restricted network sandbox. Re-running
+the key-service module with local socket access passed all 16 tests (one opt-in
+skip). Root `.env` loading, precedence, literal secret handling, Compose
+placeholder initialization and related workflow/rate tests subsequently passed
+40 focused checks. The frontend build and Django system checks passed.
+
+## P1 remediation verification — 29 October 2026
+
+After the authenticated-wrapper and workflow changes, the full suite with local
+socket access passed **181 tests, 13 skipped**. Six focused P1 tests then passed,
+including a newly added negative Connections-configuration check. Coverage includes
+public-key-only attachment/MFA forgery rejection, backup-before-rotation activation,
+restore of a newly rotated key, backup failure rollback, inactive-owner blocking,
+reactivation with fresh staff access, idle-session behavior and route/consent checks.
+Reference interoperability now verifies the added MAC using a separate test-side
+implementation; this is not an independent audit.
+
+`scripts/check_p1_ui.mjs` uses intercepted synthetic browser fixtures (no mail or
+real record writes) for stale route disabling, explicit Nophi consent, the expected
+route payload, recipient 401 re-verification, draft text and uploaded-file reference
+retention. TypeScript/Vite build and Ruff checks passed. Tests do not certify
+production rollback resistance, off-host backup durability, threshold custody or
+migration of existing unauthenticated envelopes. See P1_REMEDIATION.md.
+
+
+## P2 verification — 2026-10-29
+
+- Full backend run: 189 passed, 13 skipped; three loopback HTTPS integrations were blocked by Windows sandbox socket policy (WinError 10013).
+- Those integrations were rerun with local socket access alongside flow/P2 regressions: 51 passed, 1 skipped.
+- Final focused P2 run after quota cleanup and cache regression additions: 11 passed.
+- Frontend TypeScript/Vite build passed; Ruff passed; Django migration drift check reported no changes.
+- Intercepted-API browser checks passed: invalid address cannot submit, stale route stays blocked, explicit Nophi consent, 360 px recipient OTP/upload overflow checks, re-verification retains draft/files, and development inbox requires a memory-only operator capability and clears captured contents on lock.
+- No real SMTP messages were sent. These runs do not establish production PostgreSQL concurrency, deployed nginx headers, full-stack 360 px key-service readiness, independent cryptographic review or successful migration of existing legacy envelopes.
+- P2-10 remains partially remediated. See P2_REMEDIATION.md.
+
+
+## P3 verification — 2026-10-29
+
+Full synthetic regression suite: **198 passed, 13 skipped** with local test sockets permitted. Focused crypto/flow/P3 run: 57 passed. Frontend TypeScript/Vite build and Ruff passed. Browser fixtures confirmed current invitation history replacement, session-based reload, 360 px recipient flows, draft preservation and operator inbox locking. The optimization regression injects a failed handshake under python -O and confirms explicit failure detection. Rotation tests simulate a lost response after remote commit, then replay with the original operation ID and expected version.
+
+Docker is unavailable on this host; the pinned non-root frontend container and actual nginx response headers still need a Linux deployment/build check. No live service restart, real email, legacy data migration or production approval is implied. See P3_REMEDIATION.md.

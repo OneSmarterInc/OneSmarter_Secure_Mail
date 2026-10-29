@@ -67,7 +67,8 @@ def adapters(context, client_context, directory, cert, key, browser=False):
         backup = Path(directory) / "synthetic-backup.bin"
         backup.write_bytes(b"Synthetic backup transfer fixture")
         upload_encrypted_backup(backup, origin + "/backup", str(cert), str(cert), str(key))
-        assert received == [backup.read_bytes()]
+        if not (received == [backup.read_bytes()]):
+            raise RuntimeError("Transport verification failed")
         if browser:
             result = subprocess.run(
                 ["node", str(Path(__file__).with_name("check_pq_browser.mjs"))],
@@ -76,8 +77,10 @@ def adapters(context, client_context, directory, cert, key, browser=False):
                 capture_output=True,
                 timeout=45,
             )
-            assert result.returncode == 0, result.stderr
-            assert "browser:" + tls.GROUP in received
+            if not (result.returncode == 0):
+                raise RuntimeError(result.stderr)
+            if "browser:" + tls.GROUP not in received:
+                raise RuntimeError("Transport verification failed")
     finally:
         http.shutdown()
         http.server_close()
@@ -96,13 +99,15 @@ def adapters(context, client_context, directory, cert, key, browser=False):
                 peer, _ = local.accept()
                 with peer:
                     peer.settimeout(10)
-                    assert exact(peer, len(command)) == command
+                    if not (exact(peer, len(command)) == command):
+                        raise RuntimeError("Transport verification failed")
                     if command == b"zVERSION\0":
                         peer.sendall(b"ClamAV synthetic/version/fixture\0")
                     else:
                         size = int.from_bytes(exact(peer, 4), "big")
                         scanned.append(exact(peer, size))
-                        assert exact(peer, 4) == b"\0" * 4
+                        if not (exact(peer, 4) == b"\0" * 4):
+                            raise RuntimeError("Transport verification failed")
                         peer.sendall(b"stream: OK\0")
         finally:
             local.close()
@@ -117,14 +122,17 @@ def adapters(context, client_context, directory, cert, key, browser=False):
             with client_context.wrap_socket(raw, server_hostname="localhost") as peer:
                 tls.verify(peer, required=True)
                 peer.sendall(b"zVERSION\0")
-                assert peer.recv(4096) == b"ClamAV synthetic/version/fixture\0"
+                if not (peer.recv(4096) == b"ClamAV synthetic/version/fixture\0"):
+                    raise RuntimeError("Transport verification failed")
         with socket.create_connection(gateway.server_address, timeout=5) as raw:
             with client_context.wrap_socket(raw, server_hostname="localhost") as peer:
                 tls.verify(peer, required=True)
                 peer.sendall(b"zINSTREAM\0" + (4).to_bytes(4, "big") + b"test" + b"\0" * 4)
-                assert peer.recv(4096) == b"stream: OK\0"
+                if not (peer.recv(4096) == b"stream: OK\0"):
+                    raise RuntimeError("Transport verification failed")
         daemon_thread.join(12)
-        assert scanned == [b"test"]
+        if not (scanned == [b"test"]):
+            raise RuntimeError("Transport verification failed")
     finally:
         gateway.shutdown()
         gateway.server_close()
@@ -168,12 +176,16 @@ def exchange(server_context, client_context, *, hostname="localhost", success=Tr
     finally:
         thread.join(12)
         listener.close()
-    assert not thread.is_alive(), "TLS worker did not terminate"
-    assert accepted == success, (success, accepted, results)
+    if thread.is_alive():
+        raise RuntimeError("TLS worker did not terminate")
+    if not (accepted == success):
+        raise RuntimeError((success, accepted, results))
     if success:
-        assert results == [tls.GROUP, "received_application_data"], results
+        if not (results == [tls.GROUP, "received_application_data"]):
+            raise RuntimeError(results)
     else:
-        assert "received_application_data" not in results, results
+        if "received_application_data" in results:
+            raise RuntimeError(results)
 
 
 def main():

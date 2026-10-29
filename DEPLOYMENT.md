@@ -25,3 +25,46 @@ The clean interface is not production certification. `deploy/production.env.exam
 Outstanding work includes independent hybrid-crypto review; approved PQ ingress/key/scanner/recovery coverage; custody and coordinated restore evidence; actual SMTP/delivery tests; immutable audit storage; region and backup/disposal policies; container resource/load verification. The selected instance-mounted persistent document storage also needs its production adapter/mount checks: the current local storage adapter is restricted to synthetic mode and the optional S3 adapter is not the selected document-storage target. See RELEASE_GATES.md and OPERATIONS_RUNBOOK.md.
 
 The existing PQ ingress candidate now proxies both API namespaces and denies development endpoints. It still requires a compatible reviewed nginx/OpenSSL build, certificates, private socket permissions and deployment validation. No DNS, AWS resources, real email or public deployment was changed by this work.
+
+## Trusted proxy and token buckets (29 October 2026)
+
+The edge overwrites `X-Real-IP` with its socket peer and removes incoming
+`X-Forwarded-For` / `Forwarded` assertions. Django trusts this single IP only
+when the immediate peer is explicitly configured in `TRUSTED_PROXY_IPS` (exact
+addresses; default empty). Missing/malformed assertions from a trusted peer
+are rejected. Untrusted peers cannot override their socket address.
+
+Compose sets `TRUSTED_PROXY_IPS=127.0.0.1`; nginx and Gunicorn share a network
+namespace and Gunicorn binds only loopback. Do not publish the backend port.
+For native Vite development, its proxy also overwrites these headers; set the
+same variable on the API process. Loopback trust includes other local processes,
+so use only on a trusted development machine. Never trust a broad Docker/private
+subnet. A load balancer in front of nginx requires a separately reviewed real-IP
+configuration; these templates assume nginx is the direct client-facing edge.
+
+The PQ template uses `TRUSTED_PROXY_UNIX_SOCKET=true` only with Gunicorn bound
+exclusively to the restricted Unix socket. Empty `REMOTE_ADDR` is trusted only
+under this explicit option; it never grants trust to TCP peers. Socket ownership
+must restrict writers to the gateway and application operators.
+
+Each identified operation consumes tokens from both an identity-wide bucket and
+an identity-plus-client-IP bucket. This preserves protection against source-IP
+rotation without giving all accounts behind NAT one small allowance. Anonymous
+landing/bootstrap requests use a client-IP bucket. Shared public-IP users still
+share anonymous limits; distributed attacks and aggregate traffic need separate
+edge capacity controls. An attacker can exhaust a targeted identity allowance;
+this is the intentional account brute-force limit, not an organization-wide lock.
+
+Existing `maximum` is bucket capacity; `seconds` is time to refill a completely
+empty bucket. Login holds 10 tokens and refills one per 30 seconds; MFA holds 5
+and refills one per 60 seconds. Integer credits preserve fractional refill,
+cap at capacity, and are updated under database row locks. Exhaustion returns
+429 without restarting a fixed window. A request denied by one applicable bucket
+still counts as an attempt in the other. Backwards clock movement cannot mint
+extra tokens; synchronized host clocks remain operationally necessary.
+
+Migration `0006_token_rate_buckets` replaces transient fixed-window counters.
+Stop old application/worker processes, apply `python manage.py migrate`, and
+restart with matching code/configuration. This rollout resets rate allowances;
+no accounts, conversations or documents are removed. Do not run mixed old/new
+application versions against the changed rate-bucket schema.

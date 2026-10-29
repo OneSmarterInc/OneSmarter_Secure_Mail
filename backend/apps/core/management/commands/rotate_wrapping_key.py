@@ -12,16 +12,33 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--organization", required=True)
         parser.add_argument("--reason", required=True)
+        parser.add_argument(
+            "--request-id",
+            required=True,
+            help="UUID retained and reused for every retry of this operation",
+        )
+        parser.add_argument(
+            "--expected-active",
+            required=True,
+            help="Observed active UUID, or none for first provisioning; reuse on retry",
+        )
 
     def handle(self, *args, **options):
         try:
             org = Organization.objects.get(pk=options["organization"])
-            key = rotate(org, reason=options["reason"])
+            key = rotate(
+                org,
+                reason=options["reason"],
+                request_id=options["request_id"],
+                expected_active=None
+                if options["expected_active"] == "none"
+                else options["expected_active"],
+            )
         except Exception as exc:
             raise CommandError(
                 "Key rotation could not be confirmed. Inspect service versions before retrying; "
-                "a remote activation may have committed before the response failed."
+                "reuse the SAME request ID, expected active version and reason when retrying."
             ) from exc
         self.stdout.write(
-            f"Activated wrapping-key version {key.pk}. Old keys remain available. No document was re-encrypted."
+            f"Rotation operation resolved to wrapping-key version {key.pk} ({key.state}). Old keys remain available. No document was re-encrypted."
         )

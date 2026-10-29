@@ -457,7 +457,7 @@ def test_django_service_integration_and_local_import(live_service, settings, mon
     settings.KEY_SERVICE_CA = str(live["certs"]["ca"])
     settings.KEY_SERVICE_CERT = str(live["certs"]["maintenance"][0])
     settings.KEY_SERVICE_KEY = str(live["certs"]["maintenance"][1])
-    new = keyring.rotate(org)
+    new = keyring.rotate(org, request_id=str(uuid.uuid4()), expected_active=None)
     settings.KEY_SERVICE_CERT = str(live["certs"]["workload"][0])
     settings.KEY_SERVICE_KEY = str(live["certs"]["workload"][1])
 

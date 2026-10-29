@@ -52,7 +52,7 @@ Preserve `secure_mail.decide_delivery` and its tests unless an intentional chang
 ## Product invariants
 
 - Reject invalid submissions before sending. The pure routing function's protected result is not a validation success or authorization grant.
-- Apply routing to authenticated sender identity and all To/Cc/Bcc envelope recipients. Exact company domain only; preserve the Nophi matcher boundaries.
+- Apply routing to authenticated sender identity and all To/Cc/Bcc envelope recipients. Exact company domain only. The application requires an explicit Nophi toggle and acknowledgement; subject matching remains only in the historical pure-policy module.
 - Secure-information requests and existing protected threads cannot be downgraded through Nophi or internal recipients.
 - Nophi requires an explicit staff permission. The backend implements that check; preserve it and its regression tests. Never rely on hiding a button.
 - Blank instructions are valid for secure requests. Recipient responses require text and/or files. Ordinary-message validation must follow the approved product rule.

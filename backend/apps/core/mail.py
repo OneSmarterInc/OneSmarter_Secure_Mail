@@ -7,7 +7,7 @@ from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
 from django.utils import timezone
 
-from . import crypto, document_service, storage
+from . import crypto, document_service, senders, storage
 from .email_templates import notification_html
 from .models import Attachment, DeliveryJob, OTPChallenge, StaffInvitation
 from .services import audit, digest, lock_organization
@@ -37,7 +37,9 @@ def process_job(job_id):
             job.next_attempt = timezone.now() + timedelta(seconds=15)
             job.save(update_fields=["error_code", "next_attempt", "updated_at"])
             return
-        if job.actor and job.actor.status != "active":
+        if (job.actor and job.actor.status != "active") or (
+            job.conversation and job.conversation.owner.status != "active"
+        ):
             # Invitations created by an administrator must also stop if authority is withdrawn.
             job.state = "cancelled"
             job.error_code = "actor_unavailable"
@@ -102,19 +104,32 @@ def process_job(job_id):
         job.state = "sending"
         job.attempts += 1
         job.save()
+    submission_started = False
+    smtp_connection = None
     try:
         if job.conversation_id and not document_service.ready():
             raise document_service.ServiceDisabled()
         if settings.MAIL_PROVIDER == "development" and settings.SYNTHETIC_MODE:
             state = "development_delivered"
         else:
-            if not settings.EMAIL_HOST_USER or not settings.EMAIL_HOST_PASSWORD:
-                raise smtplib.SMTPAuthenticationError(535, b"Configuration unavailable")
+            ordinary = bool(job.conversation and not job.conversation.protected)
+            sender = senders.address(
+                data.get("from", "") if ordinary else settings.DEFAULT_FROM_EMAIL
+            )
+            if ordinary and (
+                not job.actor
+                or sender != job.conversation.sender
+                or sender not in job.actor.sender_addresses
+                or job.actor.organization_id != job.organization_id
+            ):
+                raise senders.SenderUnavailable("Sender authority was withdrawn")
+            smtp_connection = senders.connection(sender)
             text = data["body"] + ("\n\n" + data["link"] if data.get("link") else "")
             message = EmailMultiAlternatives(
                 subject=data["subject"],
                 body=text,
-                from_email=data.get("from", settings.DEFAULT_FROM_EMAIL),
+                from_email=sender,
+                connection=smtp_connection,
                 to=[data["to"]],
                 headers={"Message-ID": f"<{job.pk}@{settings.COMPANY_DOMAIN}>"},
             )
@@ -142,22 +157,39 @@ def process_job(job_id):
                 message.attach(name, document, attachment.media_type)
             if job.conversation_id and not document_service.ready():
                 raise document_service.ServiceDisabled()
-            message.send(fail_silently=False)
+            smtp_connection.open()  # Connect, TLS and authenticate before submission.
+            submission_started = True
+            if message.send(fail_silently=False) != 1:
+                raise smtplib.SMTPException("No acceptance confirmation")
             state = "provider_accepted"
         error = ""
     except document_service.ServiceDisabled:
         state, error = "retry", "service_disabled"
+    except senders.SenderUnavailable:
+        state, error = "failed", "sender_not_configured"
     except smtplib.SMTPAuthenticationError:
         state, error = "failed", "mail_authentication_failed"
     except (OSError, smtplib.SMTPException):
         # A disconnect can follow acceptance. Do not blindly retry an ambiguous SMTP send.
-        state, error = "uncertain", "delivery_outcome_unknown"
+        if submission_started:
+            state, error = "uncertain", "delivery_outcome_unknown"
+        else:
+            state = "retry" if job.attempts < 5 else "failed"
+            error = "mail_connection_failed"
     except Exception:
         state, error = "failed", "delivery_failed"
+    finally:
+        if smtp_connection is not None:
+            try:
+                smtp_connection.close()
+            except (OSError, smtplib.SMTPException):
+                pass  # QUIT failure cannot undo a confirmed DATA acceptance.
     with transaction.atomic():
         lock_organization(org_id)
         job = DeliveryJob.objects.select_for_update().get(pk=job_id)
         job.state, job.error_code = state, error
+        if error == "mail_connection_failed" and state == "retry":
+            job.next_attempt = timezone.now() + timedelta(seconds=min(900, 15 * 2**job.attempts))
         if error == "service_disabled":
             job.next_attempt = timezone.now() + timedelta(seconds=15)
         if state == "provider_accepted":

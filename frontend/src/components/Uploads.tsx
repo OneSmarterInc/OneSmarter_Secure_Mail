@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { bytes } from "../api";
-import { api } from "../api";
+import { uploadFile } from "../api";
 import type { FileItem } from "../types";
 import { ErrorNotice, Icon } from "./ui";
 
@@ -15,6 +15,11 @@ export function Uploads({
   recipient?: boolean;
   onBusy?: (busy: boolean) => void;
 }) {
+  const controller = useRef<AbortController | null>(null);
+  useEffect(() => () => controller.current?.abort(), []);
+  const [progress, setProgress] = useState<
+    { name: string; percent: number; rejected: boolean }[]
+  >([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const input = useRef<HTMLInputElement>(null);
@@ -31,15 +36,43 @@ export function Uploads({
       setError("Choose up to 10 files, 25 MB combined.");
       return;
     }
+    controller.current = new AbortController();
+    setProgress(
+      Array.from(selected).map((file) => ({
+        name: file.name,
+        percent: 0,
+        rejected: false,
+      })),
+    );
     setBusy(true);
     onBusy?.(true);
     try {
-      for (const file of Array.from(selected)) {
-        const form = new FormData();
-        form.append("file", file);
-        const uploaded = await api<FileItem>(
-          recipient ? "/recipient/attachments" : "/attachments",
-          { method: "POST", body: form },
+      for (const [index, file] of Array.from(selected).entries()) {
+        let uploaded: FileItem;
+        try {
+          uploaded = await uploadFile<FileItem>(
+            recipient ? "/recipient/attachments" : "/attachments",
+            file,
+            (percent) =>
+              setProgress((items) =>
+                items.map((item, i) =>
+                  i === index ? { ...item, percent } : item,
+                ),
+              ),
+            controller.current.signal,
+          );
+        } catch (err) {
+          setProgress((items) =>
+            items.map((item, i) =>
+              i === index ? { ...item, rejected: true } : item,
+            ),
+          );
+          throw err;
+        }
+        setProgress((items) =>
+          items.map((item, i) =>
+            i === index ? { ...item, percent: 101 } : item,
+          ),
         );
         next.push(uploaded);
         onChange([...next]);
@@ -72,6 +105,29 @@ export function Uploads({
           aria-label="Upload attachments"
         />
       </label>
+      <div role="status" aria-live="polite">
+        {progress.map((item, index) => (
+          <div key={index}>
+            <span>
+              {item.name}:{" "}
+              {item.rejected
+                ? "Not accepted"
+                : item.percent > 100
+                  ? "Available"
+                  : item.percent === 100
+                    ? "Checking"
+                    : `Uploading ${item.percent}%`}
+            </span>
+            {!item.rejected && item.percent < 100 && (
+              <progress
+                aria-label={`Upload ${item.name}`}
+                value={item.percent}
+                max={100}
+              />
+            )}
+          </div>
+        ))}
+      </div>
       <ErrorNotice message={error} />
       <div aria-live="polite">
         {files.map((f) => (
@@ -83,7 +139,11 @@ export function Uploads({
                 {bytes(f.size)} ·{" "}
                 {f.scan_method === "synthetic-validation-only"
                   ? "Antivirus scan not performed"
-                  : f.state}
+                  : f.state === "available"
+                    ? "Available"
+                    : f.state === "rejected"
+                      ? "Rejected"
+                      : "Checking"}
               </small>
             </span>
             <button

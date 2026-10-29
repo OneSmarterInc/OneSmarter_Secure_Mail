@@ -13,6 +13,7 @@ export function Auth({
   activation?: string;
   onLogin: (u: User) => void;
 }) {
+  const [setupToken, setSetupToken] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
@@ -39,9 +40,12 @@ export function Auth({
     try {
       const result = await post<{ enrollment_required: boolean }>(
         activation ? "/auth/activate" : setup ? "/auth/setup" : "/auth/login",
-        activation ? { token: activation, password } : { email, password },
+        activation
+          ? { token: activation, password }
+          : { email, password, ...(setup ? { setup_token: setupToken } : {}) },
       );
       setPassword("");
+      setSetupToken("");
       if (result.enrollment_required) {
         const enrollment = await post<{ secret: string; uri: string }>(
           "/auth/enroll",
@@ -147,6 +151,18 @@ export function Auth({
           <ErrorNotice message={error} />
           {stage === "password" && (
             <form onSubmit={credentials} className="stack">
+              {setup && (
+                <label>
+                  One-time setup token
+                  <input
+                    type="password"
+                    required
+                    autoComplete="off"
+                    value={setupToken}
+                    onChange={(e) => setSetupToken(e.target.value)}
+                  />
+                </label>
+              )}
               {!activation && (
                 <label>
                   Company email

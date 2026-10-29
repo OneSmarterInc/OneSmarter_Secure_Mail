@@ -9,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from . import crypto
+from .client_ip import client_ip
 from .http import Problem
 from .models import AuditEvent, DeliveryJob, IdempotencyRecord, Organization, RateBucket
 
@@ -61,25 +62,38 @@ def audit(
 
 
 def rate_limit(request, scope: str, identity: str = "", *, maximum=10, seconds=300):
-    # Never trust arbitrary forwarded IP headers. Proxy trust must be configured separately.
-    identities = [f"ip:{request.META.get('REMOTE_ADDR', 'unknown')}"]
-    if identity:
-        identities.append(f"identity:{identity.lower()}")
+    """Atomic token buckets, using integer credits to avoid floating-point drift."""
+    if maximum <= 0 or seconds <= 0:
+        raise ValueError("Rate bucket capacity and refill period must be positive")
+    ip = client_ip(request)
+    identity = identity.strip().lower()
+    # Separate people behind one NAT do not consume each other's account allowance.
+    # The identity bucket also prevents bypass by rotating source IPs.
+    identities = (
+        [f"identity:{identity}", f"identity-ip:{identity}:{ip}"] if identity else [f"ip:{ip}"]
+    )
+    period = seconds * 1_000_000
+    capacity = maximum * period
     now = timezone.now()
     rejected = False
     with transaction.atomic():
-        for identity_value in identities:
-            key = keyed(f"rate:{scope}:{identity_value}")
+        for value in sorted(identities):
+            key = keyed(f"token-rate:v1:{scope}:{value}")
             bucket, _ = RateBucket.objects.get_or_create(
-                key=key, defaults={"expires_at": now + timedelta(seconds=seconds)}
+                key=key, defaults={"credits": capacity, "refilled_at": now}
             )
             bucket = RateBucket.objects.select_for_update().get(pk=bucket.pk)
-            if bucket.expires_at <= now:
-                bucket.count = 0
-                bucket.expires_at = now + timedelta(seconds=seconds)
-            bucket.count += 1
-            rejected |= bucket.count > maximum
-            bucket.save(update_fields=["count", "expires_at"])
+            previous = bucket.refilled_at or now
+            delta = max(now - previous, timedelta(0))
+            elapsed = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+            bucket.credits = min(capacity, bucket.credits + elapsed * maximum)
+            # A backwards wall-clock adjustment must not mint tokens twice.
+            bucket.refilled_at = max(previous, now)
+            if bucket.credits < period:
+                rejected = True
+            else:
+                bucket.credits -= period
+            bucket.save(update_fields=["credits", "refilled_at"])
     if rejected:
         raise Problem("Too many attempts. Please try again later.", "rate_limited", 429)
 

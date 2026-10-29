@@ -9,6 +9,7 @@ x-app: &app
     POSTGRES_USER: secure_mail
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/init_compose.py first}
     REDIS_URL: redis://redis:6379/0
+    TRUSTED_PROXY_IPS: "127.0.0.1"
     PUBLIC_URL: http://localhost:8080
     CSRF_TRUSTED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
     MAIL_PROVIDER: development

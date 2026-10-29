@@ -1,13 +1,26 @@
-"""Generate a local Compose database credential once, without displaying it."""
+"""Generate the missing local Compose database credential without displaying it."""
 
 import secrets
 from pathlib import Path
 
-path = Path(__file__).resolve().parents[1] / ".env"
-try:
-    with path.open("x", encoding="utf-8") as stream:
-        stream.write("POSTGRES_PASSWORD=" + secrets.token_urlsafe(48) + "\n")
+from dotenv import dotenv_values, set_key
+
+
+def initialize(path: Path) -> bool:
+    existing = dotenv_values(path, interpolate=False) if path.exists() else {}
+    if existing.get("POSTGRES_PASSWORD"):
+        return False
+    if not path.exists():
+        path.touch(mode=0o600, exist_ok=False)
+    set_key(path, "POSTGRES_PASSWORD", secrets.token_urlsafe(48), quote_mode="always")
     path.chmod(0o600)
-    print("Created private local Compose configuration.")
-except FileExistsError:
-    print("Existing .env preserved. Confirm POSTGRES_PASSWORD is set before starting Compose.")
+    return True
+
+
+if __name__ == "__main__":
+    changed = initialize(Path(__file__).resolve().parents[1] / ".env")
+    print(
+        "Created private Compose database credential."
+        if changed
+        else "Existing credential preserved."
+    )

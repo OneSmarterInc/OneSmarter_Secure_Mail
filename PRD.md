@@ -1,6 +1,12 @@
 # OneSmarter Secure Mail — Product Requirements
 
-Updated: 2026-10-28. Status: implementation baseline with explicitly open decisions.
+Updated: 2026-10-29. Status: authoritative product baseline with explicitly open decisions.
+
+The 27 October developer/BA handoff v1.0 is retired. See the
+[handoff v1.1 retirement notice](OneSmarter_Secure_Mail_Requirements.md).
+Use this PRD for product requirements, API_REFERENCE.md for interfaces, and
+RELEASE_GATES.md for permission to release. Code/spec discrepancies are defects
+or require an approved decision change; implementation alone is not approval.
 
 ## Document-storage decision - 28 October 2026
 
@@ -72,13 +78,16 @@ All reads, replies, uploads, and downloads require organization and conversation
 
 1. Reject malformed input, unauthorized senders, invalid recipients, prohibited files, and invalid empty submissions at the API boundary. Never turn validation failure into normal delivery.
 2. Secure-information invitations and existing protected threads remain protected.
-3. For an eligible new ordinary conversation, a standalone case-insensitive `Nophi` marker chooses normal delivery only for staff explicitly granted that permission (D06).
+3. For an eligible new ordinary conversation, an explicit Nophi toggle plus acknowledgement chooses normal delivery only for staff explicitly granted that permission (D06). A subject word alone never activates the application override.
 4. Otherwise, all recipients must have the exact domain `onesmarter.com` for normal delivery.
 5. Any external recipient in To, Cc, or Bcc makes the entire remaining message protected.
 
 Evaluate authenticated identity and every envelope recipient, not an untrusted From header. `sub.onesmarter.com` and `onesmarter.com.attacker.example` are external under this baseline.
 
-Accepted markers include `Nophi`, `Nophi: notes`, and `[NOPHI] notes`. `nonophi`, `Nophiology`, `Nophi_1`, and `no-nophi` do not trigger the override. Preserve the current matching boundaries until an explicit policy change. Retain the marker pending D07.
+The historical pure-policy module retains its subject-matcher tests for reference.
+The application supplies the override only after the explicit control is selected;
+it never strips or interprets an incidental Nophi word as consent. Every ordinary
+send carries the displayed expected route; a changed route is rejected for review.
 
 Show **Normal email — Nophi override** before sending, record the reason and policy version, and never label normal email as inherently unencrypted. Nophi does not classify the content as non-sensitive.
 
@@ -145,7 +154,7 @@ The Accounts page lists all staff and administrator accounts within the administ
 
 Proposed lifecycle: **Invited → Active → Suspended or Deactivated**; permitted reactivation is an explicit audited action. Activation expiry and temporary authentication lockout are separately represented, not confused with deliberate deactivation. Protect the last active administrator and prevent self-lockout or concurrent role changes from removing all administrative access. Provision the first administrator through a controlled, audited bootstrap procedure, never a public signup route.
 
-Suspension/deactivation revokes staff sessions and blocks subsequent protected operations and new sending. Workers recheck authorization before executing pending user-originated sends. Preserve conversations and audit attribution; ownership/reassignment remains governed by D10 rather than deleting data with the account. Changing a login mailbox requires a dedicated verified flow with session/invitation invalidation, not a casual profile edit.
+Suspension/deactivation revokes staff sessions and blocks subsequent protected operations and new sending. Workers recheck authorization before executing pending user-originated sends. Preserve conversations and audit attribution; ownership stays with the original staff member through deactivation and reactivation (D10); recipient access/submissions are blocked while the owner is inactive. Changing a login mailbox requires a dedicated verified flow with session/invitation invalidation, not a casual profile edit.
 
 ### Account directory and details
 
@@ -247,10 +256,10 @@ Track invitation-to-submission completion, notification outcomes, verification f
 | D04 | Supplied HTML visual direction | Selected reference; accessibility refinements in DESIGN_SYSTEM.md |
 | D05 | Staff authentication provider and MFA recovery | Application-managed accounts implemented with authenticator TOTP, single-use recovery codes, admin-issued password recovery and session revocation; production recovery policy still needs approval |
 | D06 | Who may use Nophi | Explicit permission only; backend enforcement and actionable rejection implemented and tested |
-| D07 | Strip Nophi and/or require acknowledgement | Open; retain marker pending decision; product |
+| D07 | Nophi interaction | Explicit toggle and acknowledgement required; subject text is retained and does not activate the override |
 | D08 | Retention, deletion, legal hold, exports, data residency | Committed submissions have no automatic age-based deletion and survive access/session expiry. Detailed disposal/legal-hold, audit/export/backup periods and region remain unresolved before real-data use; see DATA_RETENTION.md |
 | D09 | OTP/session/attachment default approval | Proposed table above; product/security |
-| D10 | Shared ownership, assignment, exceptional administrator access | Open; product/security |
+| D10 | Deactivation and ownership | User decision 29 October: preserve conversation ownership; disable staff access while deactivated and restore after reactivation/fresh login. Do not reassign automatically. Block recipient access/submissions while the owner is inactive. Shared ownership/exceptional access remains out of scope |
 | D11 | Per-recipient/group reply visibility and revocation scope | Private recipient-to-staff proposed; product/security |
 | D12 | Latency, availability, RTO/RPO, operating budget | Open; product/operations |
 | D13 | Searchable fields with encrypted subject/body | Metadata-first proposed; product/security/engineering |
@@ -259,7 +268,7 @@ Track invitation-to-submission completion, notification outcomes, verification f
 | D16 | Account usage details and table defaults | Required by user; current 7/30/90-day counters and retained-storage gauges implemented; shared ownership remains outside current assignment model |
 | D17 | Cryptographic implementation ownership | User requires our own system, replacing OSIVault. OneSmarter v2 envelopes, key versions, rotation and migration implemented using cryptography; protocol/PQ coverage review remains mandatory |
 | D18 | No external managed KMS | User excludes AWS KMS; isolated OneSmarter key service is the target. Runtime KMS adapters/settings removed; S3 uses SSE-S3; isolated candidate and custodian webpage implemented, production approval pending |
-| D19 | Root custody and service operation | Operator-unlocked versus hardware-backed custody, quorum/custodians, boot/unseal and recovery procedures remain open. A local development root file is not a production solution |
+| D19 | Root custody and service operation | Operator unlock through the separate custodian page is implemented for synthetic use. Named custodians, quorum/hardware policy, production boot/unseal and recovery approval remain open. A local development root file is not production custody |
 
 ## Terminology
 

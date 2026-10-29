@@ -7,6 +7,8 @@ These operations are not ordinary portal-administrator endpoints.
 import base64
 import json
 import secrets
+import threading
+import time
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey
@@ -18,7 +20,7 @@ from django.db import transaction
 from backend.keyservice import protocol
 from backend.keyservice.client import Client
 
-from .models import WrappingKeyVersion
+from .models import IdempotencyRecord, WrappingKeyVersion
 
 SUITE = "OSM-v2-MLKEM768-X25519-HKDFSHA256-AES256GCM"
 
@@ -92,17 +94,55 @@ def private_keys(key: WrappingKeyVersion) -> tuple[MLKEM768PrivateKey, X25519Pri
 
 
 @transaction.atomic
-def rotate(org, *, actor=None, reason: str = "Initial key provisioning") -> WrappingKeyVersion:
-    from .services import audit, lock_organization
+def rotate(
+    org,
+    *,
+    actor=None,
+    reason: str = "Initial key provisioning",
+    request_id: str | None = None,
+    expected_active: str | None = "",
+) -> WrappingKeyVersion:
+    from .services import audit, keyed, lock_organization
 
     organization = lock_organization(org)
+    if settings.KEY_PROTECTOR == "key-service" and (not request_id or expected_active == ""):
+        raise ValueError(
+            "Remote rotation requires a stable request_id and explicit expected_active (None for initial provisioning)."
+        )
+    record = None
+    if request_id:
+        request_id = str(uuid.UUID(request_id))
+        fingerprint = keyed(
+            json.dumps(
+                {
+                    "expected": expected_active,
+                    "reason": reason,
+                    "actor": str(getattr(actor, "pk", actor)),
+                },
+                sort_keys=True,
+            )
+        )
+        record = {
+            "organization": organization,
+            "actor": "key-rotation",
+            "operation": "rotate",
+            "key": request_id,
+        }
+        previous = IdempotencyRecord.objects.filter(**record).first()
+        if previous:
+            if not secrets.compare_digest(previous.fingerprint, fingerprint):
+                raise ValueError("Rotation operation ID was reused with different parameters.")
+            return WrappingKeyVersion.objects.get(
+                pk=previous.resource_id, organization=organization
+            )
+        record["fingerprint"] = fingerprint
     if settings.KEY_PROTECTOR == "key-service":
-        current = active_remote(organization.pk, required=False)
+        clear_remote_cache()
         result = service().call(
             "rotate",
             organization=str(organization.pk),
-            expected=str(current.pk) if current else None,
-            request_id=str(uuid.uuid4()),
+            expected=expected_active,
+            request_id=request_id,
         )
         key = synchronize(result)
         audit(
@@ -113,7 +153,14 @@ def rotate(org, *, actor=None, reason: str = "Initial key provisioning") -> Wrap
             key.pk,
             metadata={"suite": SUITE, "reason": reason[:300]},
         )
+        IdempotencyRecord.objects.create(**record, resource_id=str(key.pk))
         return key
+    if expected_active != "":
+        current = WrappingKeyVersion.objects.filter(
+            organization=organization, state="active"
+        ).first()
+        if (str(current.pk) if current else None) != expected_active:
+            raise ValueError("Active key changed; confirm the rotation plan.")
     pq, classical = MLKEM768PrivateKey.generate(), X25519PrivateKey.generate()
     key = WrappingKeyVersion(
         organization=organization,
@@ -137,6 +184,8 @@ def rotate(org, *, actor=None, reason: str = "Initial key provisioning") -> Wrap
         key.pk,
         metadata={"suite": SUITE, "reason": reason[:300]},
     )
+    if record:
+        IdempotencyRecord.objects.create(**record, resource_id=str(key.pk))
     return key
 
 
@@ -207,7 +256,28 @@ def synchronize(metadata: dict) -> WrappingKeyVersion:
     return key
 
 
+_remote_cache = threading.local()
+
+
+def clear_remote_cache():
+    _remote_cache.entry = None
+
+
 def active_remote(org, *, required=True):
+    scope = str(getattr(org, "pk", org))
+    identity = (
+        scope,
+        settings.KEY_SERVICE_URL,
+        str(settings.KEY_SERVICE_CERT),
+        str(settings.KEY_SERVICE_KEY),
+        str(settings.KEY_SERVICE_CA),
+        settings.PQ_TRANSPORT_REQUIRED,
+    )
+    cached = getattr(_remote_cache, "entry", None)
+    # Only public metadata is cached. Every wrap still requires a live service
+    # authorization and expected-active-version check; there is no local fallback.
+    if required and cached and cached[0] == identity and time.monotonic() < cached[1]:
+        return cached[2]
     versions = service().call("versions", organization=str(getattr(org, "pk", org)), active=True)[
         "versions"
     ]
@@ -217,5 +287,7 @@ def active_remote(org, *, required=True):
     if active:
         if active[0]["organization"] != str(getattr(org, "pk", org)):
             raise ValueError("Wrong key scope.")
-        return synchronize(active[0])
+        key = synchronize(active[0])
+        _remote_cache.entry = (identity, time.monotonic() + 2, key)
+        return key
     return None

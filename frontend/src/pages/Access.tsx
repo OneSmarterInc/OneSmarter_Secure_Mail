@@ -492,6 +492,14 @@ function AccountDetails({
       ? [
           { value: "suspend", label: "Suspend account" },
           { value: "recovery", label: "Send password recovery invitation" },
+          ...(user.can_manage_privileges && user.id !== account.id
+            ? [
+                {
+                  value: "reset_mfa",
+                  label: "Reset MFA (identity verification required)",
+                },
+              ]
+            : []),
           { value: "revoke_sessions", label: "Revoke sessions" },
         ]
       : []),
@@ -502,12 +510,13 @@ function AccountDetails({
       ? [{ value: "deactivate", label: "Deactivate account" }]
       : []),
   ];
+  const actionKey = useRef({ signature: "", key: crypto.randomUUID() });
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError("");
     try {
-      await post(`/admin/accounts/${account.id}`, {
+      const data = {
         action,
         reason,
         ...(action === "edit" ? { name } : {}),
@@ -523,7 +532,11 @@ function AccountDetails({
                 .filter(Boolean),
             }
           : {}),
-      });
+      };
+      const signature = JSON.stringify(data);
+      if (actionKey.current.signature !== signature)
+        actionKey.current = { signature, key: crypto.randomUUID() };
+      await post(`/admin/accounts/${account.id}`, data, actionKey.current.key);
       onDone();
     } catch (err) {
       if (err instanceof ApiError && err.code === "step_up_required")

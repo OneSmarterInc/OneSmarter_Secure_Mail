@@ -5,7 +5,7 @@ import {
   type ErrorInfo,
   type ReactNode,
 } from "react";
-import { api, formatDate, post, recipientPortal, useResource } from "./api";
+import { api, formatDate, post, recipientPortal } from "./api";
 import type { InboxItem, Session, User } from "./types";
 import {
   Badge,
@@ -50,7 +50,38 @@ class ErrorBoundary extends Component<
 
 function DevelopmentInbox() {
   const [refresh, setRefresh] = useState(0);
-  const result = useResource<{ results: InboxItem[] }>("/dev/inbox", refresh);
+  const [token, setToken] = useState("");
+  const [capability, setCapability] = useState("");
+  const [result, setResult] = useState<{
+    data: { results: InboxItem[] } | null;
+    loading: boolean;
+    error: string;
+  }>({ data: null, loading: false, error: "" });
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!capability) {
+      setResult({ data: null, loading: false, error: "" });
+      return () => controller.abort();
+    }
+    setResult({ data: null, loading: true, error: "" });
+    api<{ results: InboxItem[] }>("/dev/inbox", {
+      headers: { "X-Dev-Inbox-Token": capability },
+      signal: controller.signal,
+    })
+      .then((data) => {
+        if (!controller.signal.aborted)
+          setResult({ data, loading: false, error: "" });
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted)
+          setResult({
+            data: null,
+            loading: false,
+            error: (error as Error).message,
+          });
+      });
+    return () => controller.abort();
+  }, [capability, refresh]);
   return (
     <div className="inbox-layout">
       <header className="recipient-header">
@@ -71,10 +102,42 @@ function DevelopmentInbox() {
           }
         />
         <div className="notice warning">
-          This loopback-only mailbox displays synthetic notification contents.
-          It is not available in production. The delivery worker must be
-          running.
+          This operator-protected mailbox displays synthetic notification
+          contents. It is not available in production. The delivery worker must
+          be running.
         </div>
+        <form
+          className="stack"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setCapability(token);
+            setToken("");
+            setRefresh((v) => v + 1);
+          }}
+        >
+          <label>
+            Development inbox token
+            <input
+              type="password"
+              required
+              autoComplete="off"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
+          </label>
+          <button type="submit">Unlock inbox</button>
+          {capability && (
+            <button
+              type="button"
+              onClick={() => {
+                setCapability("");
+                setToken("");
+              }}
+            >
+              Lock inbox
+            </button>
+          )}
+        </form>
         <ErrorNotice message={result.error} />
         {result.loading ? (
           <Loading />
@@ -200,7 +263,7 @@ function Application() {
     return <Loading />;
   }
   if (recipientPortal) {
-    return token ? (
+    return token || path === "/conversation" ? (
       <Recipient key={token} token={token} />
     ) : (
       <main className="fatal-error">

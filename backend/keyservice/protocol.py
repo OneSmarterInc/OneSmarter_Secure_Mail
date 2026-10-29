@@ -1,12 +1,14 @@
-"""Frozen OSM-v2 candidate. Compatibility is not independent security approval."""
+"""OSM-v2 plus mandatory auth_v=1 candidate. Independent review is still required."""
 
 import base64
 import hashlib
+import hmac
 import json
 import re
 import secrets
 import uuid
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -15,7 +17,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 SUITE = "OSM-v2-MLKEM768-X25519-HKDFSHA256-AES256GCM"
 HEADER = ("v", "suite", "key_id", "kem", "ephemeral")
-WRAPPER = set(HEADER) | {"wrap_nonce", "key"}
+WRAPPER = set(HEADER) | {"wrap_nonce", "key", "auth_v", "auth"}
 
 
 def canonical(value: dict) -> bytes:
@@ -108,11 +110,14 @@ def validate(wrapper: dict) -> None:
         or set(wrapper) != WRAPPER
         or type(wrapper["v"]) is not int
         or wrapper["v"] != 2
+        or type(wrapper["auth_v"]) is not int
+        or wrapper["auth_v"] != 1
         or wrapper["suite"] != SUITE
         or not isinstance(wrapper["key_id"], str)
         or str(uuid.UUID(wrapper["key_id"])) != wrapper["key_id"]
     ):
         raise ValueError("Unsupported wrapper.")
+    decode(wrapper["auth"], 32)
     for field, length in {"kem": 1088, "ephemeral": 32, "wrap_nonce": 12, "key": 48}.items():
         decode(wrapper[field], length)
 
@@ -136,12 +141,16 @@ def wrap(dek: bytes, context: str, ident: str, raw: bytes) -> dict:
     wrapped = AESGCM(derive(shared, sx, header, context)).encrypt(
         nonce, dek, canonical(header) + b"\0" + context.encode()
     )
-    return {**header, "wrap_nonce": encode(nonce), "key": encode(wrapped)}
+    result = {**header, "wrap_nonce": encode(nonce), "key": encode(wrapped), "auth_v": 1}
+    return {**result, "auth": encode(authenticate(result, context, raw))}
 
 
 def unwrap(wrapper: dict, context: str, raw: bytes) -> bytes:
     organization(context)
     validate(wrapper)
+    signed = {key: value for key, value in wrapper.items() if key != "auth"}
+    if not hmac.compare_digest(decode(wrapper["auth"], 32), authenticate(signed, context, raw)):
+        raise InvalidTag("Wrapper origin authentication failed.")
     pq, classical = private_keys(raw)
     shared = pq.decapsulate(decode(wrapper["kem"], 1088))
     sx = classical.exchange(X25519PublicKey.from_public_bytes(decode(wrapper["ephemeral"], 32)))
@@ -151,3 +160,15 @@ def unwrap(wrapper: dict, context: str, raw: bytes) -> bytes:
         decode(wrapper["key"], 48),
         canonical(header) + b"\0" + context.encode(),
     )
+
+
+def authenticate(wrapper: dict, context: str, raw: bytes) -> bytes:
+    """Domain-separated MAC secret never leaves the key-service boundary."""
+    private_keys(raw)
+    key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=b"onesmarter:wrapper-origin:hmac-sha256:v1",
+    ).derive(raw)
+    return hmac.new(key, canonical(wrapper) + b"\0" + context.encode(), hashlib.sha256).digest()

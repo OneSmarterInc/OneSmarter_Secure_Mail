@@ -5,6 +5,7 @@ Certificate allowlists are reread per request so revocation needs no restart.
 """
 
 import hashlib
+import logging
 import secrets
 import ssl
 import threading
@@ -25,6 +26,8 @@ from backend.transport import tls as transport_tls
 from . import protocol as p
 from .ownership import StoreOwnership
 from .store import ConflictError, KeyStore, SealedError
+
+logger = logging.getLogger(__name__)
 
 MAX_BODY = 16384
 ROOT_OPERATIONS = {"unseal", "seal", "custody-status", "rotate-root"}
@@ -75,6 +78,8 @@ class Service:
         self.lock = threading.RLock()
         self.sessions: dict[str, dict] = {}
         self.rates: dict[str, tuple[float, int]] = {}
+        self.denial_window = 0.0
+        self.denial_count = 0
 
     def identity(self, fingerprint: str) -> dict:
         policy = strict_json(self.policy.read_bytes())
@@ -223,7 +228,11 @@ class Handler(BaseHTTPRequestHandler):
         if not cert:
             raise PermissionError("Client certificate required.")
         fp = hashlib.sha256(cert).hexdigest()
-        return fp, self.server.service.identity(fp)
+        service = self.server.service
+        # Before policy lookup and any durable denial audit; global cap bounds memory.
+        service.throttle("all-peers", 3000)
+        service.throttle("peer:" + fp, 600)
+        return fp, service.identity(fp)
 
     def do_GET(self):
         try:
@@ -310,14 +319,27 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, KeyError, InvalidTag):
             self.audit_failure(identity, "invalid_request_or_material")
             self.response(400, {"error": "invalid_request_or_material"})
-        except Exception:
-            self.response(503, {"error": "service_unavailable"})
+        except Exception as exc:
+            # No exception text/traceback, request body, certificate or key material.
+            incident = str(uuid.uuid4())
+            logger.error(
+                "key_service_unexpected incident=%s exception_type=%s", incident, type(exc).__name__
+            )
+            self.response(503, {"error": "service_unavailable", "incident_id": incident})
 
     def audit_failure(self, identity, event):
         try:
-            self.server.service.store.record_event(
-                identity["name"] if identity else "unrecognized_peer", event
-            )
+            service = self.server.service
+            with service.lock:
+                service.denial_count += 1
+                now = time.monotonic()
+                if now - service.denial_window < 60:
+                    return
+                count = service.denial_count
+                service.denial_count = 0
+                service.denial_window = now
+            # At most one denial batch per minute, outside the service lock.
+            service.store.record_event("denial_batch", f"{event}:count={count}")
         except Exception:
             # Denial remains fail-closed even if the audit store is unavailable.
             # Deployment monitoring must alert on storage failures independently.

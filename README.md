@@ -52,7 +52,7 @@ Open **http://localhost:5173**. Create the first administrator using a fictional
 
 Staff use **http://localhost:5173/staff/**; recipients follow their invitation into **http://localhost:5173/recipient/**. The sessions are separate even in the same browser. Staff/admin accounts require @onesmarter.com; recipients may use any valid mailbox. Normal pages do not expose development tools. Local email capture does not send real mail. Operators may explicitly enable `ENABLE_DEV_TOOLS=true` for disposable testing and open `/#/development/inbox`; never enable this on a shared deployment. See [DEPLOYMENT.md](DEPLOYMENT.md) for SMTP, portal URLs and release blockers.
 
-Native development stores data in ignored `.runtime/`. It contains the local database, encrypted objects and private development key files. Preserve it to keep test records readable; deleting/changing the root key without migration loses access. Do not commit or share it. Native Python reads process environment variables, not `.env` automatically.
+Native development stores data in ignored `.runtime/`. It contains the local database, encrypted objects and private development key files. Preserve it to keep test records readable; deleting/changing the root key without migration loses access. Do not commit or share it. Django loads the repository-root `.env` automatically using python-dotenv; process environment variables take precedence. Copy `.env.example` to `.env` for a new checkout and keep secrets out of Git. Set `DJANGO_READ_DOT_ENV=false` to disable local-file loading. See [ENVIRONMENT.md](ENVIRONMENT.md).
 
 ## Docker Compose
 
@@ -85,7 +85,7 @@ The Playwright flow uses its own database/ports (API 8001, frontend 5174) and pr
 
 ```powershell
 .\.venv\Scripts\python.exe manage.py key_status
-.\.venv\Scripts\python.exe manage.py rotate_wrapping_key --organization <UUID> --reason "Scheduled rotation"
+.\.venv\Scripts\python.exe manage.py rotate_wrapping_key --organization <UUID> --reason "Scheduled rotation" --request-id <OPERATION_UUID> --expected-active <ACTIVE_KEY_UUID_OR_none>
 .\.venv\Scripts\python.exe manage.py rewrap_keys --organization <UUID> --limit 100
 .\.venv\Scripts\python.exe manage.py rewrap_keys --organization <UUID> --limit 100 --apply
 ```
@@ -93,6 +93,10 @@ The Playwright flow uses its own database/ports (API 8001, frontend 5174) and pr
 Rotation preserves old keys for old documents and backups. Rewrapping is optional and resumable. There is no automatic key destruction or unsafe production-enable flag.
 
 ## Project guides
+
+The original developer/BA handoff v1.0 is retired. Read the
+[handoff v1.1 retirement notice](OneSmarter_Secure_Mail_Requirements.md);
+PRD.md is the authoritative product baseline and RELEASE_GATES.md controls release.
 
 - [PRD.md](PRD.md): flows, permissions, requirements and outstanding product decisions.
 - [TECH_STACK.md](TECH_STACK.md): architecture and integration boundaries.

@@ -96,6 +96,9 @@ test("staff request → recipient upload → staff read; accounts and immutable 
     await page
       .getByLabel("Password", { exact: true })
       .fill(credentials.password);
+    const setupToken = page.getByLabel("One-time setup token");
+    if (await setupToken.isVisible())
+      await setupToken.fill(process.env.E2E_SETUP_TOKEN || "");
     await page
       .getByRole("button", { name: /Create administrator account|Sign in/ })
       .click();
@@ -131,7 +134,9 @@ test("staff request → recipient upload → staff read; accounts and immutable 
   let invitation = "";
   await expect
     .poll(async () => {
-      const response = await page.request.get("/api/dev/inbox");
+      const response = await page.request.get("/api/dev/inbox", {
+        headers: { "X-Dev-Inbox-Token": process.env.E2E_DEV_INBOX_TOKEN || "" },
+      });
       const inbox = await response.json();
       invitation =
         inbox.results?.find(
@@ -142,6 +147,7 @@ test("staff request → recipient upload → staff read; accounts and immutable 
     })
     .toBe(true);
   const recipientContext = await browser.newContext({
+    viewport: { width: 360, height: 800 },
     storageState: { cookies: [], origins: [] },
   });
   const sara = await recipientContext.newPage();
@@ -163,7 +169,9 @@ test("staff request → recipient upload → staff read; accounts and immutable 
   let code = "";
   await expect
     .poll(async () => {
-      const response = await page.request.get("/api/dev/inbox");
+      const response = await page.request.get("/api/dev/inbox", {
+        headers: { "X-Dev-Inbox-Token": process.env.E2E_DEV_INBOX_TOKEN || "" },
+      });
       const inbox = await response.json();
       const body =
         inbox.results?.find(
@@ -315,7 +323,7 @@ test("staff request → recipient upload → staff read; accounts and immutable 
     path: resolve(artifactDir, "connections.png"),
     fullPage: true,
   });
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize({ width: 360, height: 844 });
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,

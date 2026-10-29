@@ -41,7 +41,7 @@ Compose payload: `{sender, to:[], cc:[], bcc:[], subject, body, mode:"ordinary"|
 | --- | --- |
 | POST `/recipient/landing` | `{token}`; returns organization and masked mailbox only |
 | POST `/recipient/code` | `{token}`; queues a code to the fixed grant mailbox |
-| POST `/recipient/verify` | `{token, code}`; consumes one code and creates a 15-minute conversation session |
+| POST `/recipient/verify` | `{token, code}`; consumes one code and creates a conversation session with a 15-minute idle timeout |
 | GET `/recipient/conversation` | Current grant's permitted messages/files, without other recipient identities |
 | POST `/recipient/conversation` | `{body, attachments}`; private to assigned staff; idempotency required |
 | POST `/recipient/attachments` | Multipart upload scoped to the verified recipient grant |
@@ -79,3 +79,28 @@ The last active administrator and last active privilege manager cannot remove th
 ## Development-only endpoint
 
 `GET /dev/inbox` captures the most recent synthetic notifications only when synthetic mode, development mail provider and loopback origin all apply. It intentionally exposes fictional activation links/codes like a local mail catcher. It must remain unavailable in a production environment.
+
+## Reviewed routing and recipient changes (29 October 2026)
+
+Ordinary compose requires `expected_route: {protected: boolean, reason: string}`
+matching the preview. A mismatch/missing confirmation returns `409 route_changed`
+without creating a conversation. `nophi_override: true` requires permission and
+`nophi_acknowledged: true` on send. Subject text alone never activates Nophi.
+Secure requests and protected replies cannot downgrade.
+
+POST `/recipient-api/recipient/activity` extends an unexpired authorized session
+by 15 minutes in response to user interaction. Background GET polling does not
+extend it. Expired sessions return 401 and require a fresh code; expired/revoked
+or inactive-owner grants remain unavailable. Drafts stay only in browser memory
+during re-verification, are cleared on explicit lock/unavailable grant, and do not
+survive closing/reloading the page. Re-verification never bypasses attachment grants.
+
+
+## P2 remediation update (2026-10-29)
+
+See [P2_REMEDIATION.md](P2_REMEDIATION.md) for capability configuration, required idempotency headers, administrator MFA reset, staged quotas, evidence and limitations. P2-10 remains partial: metadata caching does not remove all remote crypto calls from transaction locks. Production approval and trusted legacy-envelope migration remain blocked.
+
+
+## P3 hardening update
+
+See [P3_REMEDIATION.md](P3_REMEDIATION.md) for stable rotation IDs/expected versions, recipient URL cleanup, bounded encrypted-subject search, and deployment verification limits. Rotation retries must reuse the original operation parameters.

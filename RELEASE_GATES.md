@@ -33,3 +33,41 @@ The user requires our own system and excludes AWS KMS. This decision does not ce
 - Proof of no AWS KMS dependency, including S3 document/archive calls, infrastructure and backups; no silent fallback.
 - Same-thread retained-file reads after recipient timeout/logout/expiry/revocation; safe orphan cleanup; key/backups available for the retention horizon.
 - Verified required PQ transport, protected auditing, operational alerts and approved region/policy/availability decisions.
+
+## P0-5: independent cryptographic approval before real PHI
+
+The production startup block remains mandatory. Real PHI and other real
+confidential documents are prohibited in development, test, pilot and production
+until the applicable release evidence is approved. Setting `APP_ENV=development`
+on a public server does not create an exception. No changes in this review
+remove or weaken the startup block.
+
+Replacing the OSIVault dependency with an owned implementation transfers protocol,
+implementation and lifecycle assurance responsibility to OneSmarter. It does not
+inherit another library's review. The exact hybrid candidate must not be described
+as an approved standard merely because its individual primitives are standardized.
+
+Before real-data authorization, the product/security sponsor must allocate budget,
+appoint an independent cryptography reviewer and agree a written scope covering:
+
+1. Exact protocol version/commit, combiner, serialization, context binding,
+   randomness/nonces, decapsulation failures and downgrade rejection.
+2. Key hierarchy, root custody/unseal, workload identities, memory/export exposure,
+   version/root rotation, compromised-key response and backup/restore.
+3. Dependency provenance, independent known-answer/interoperability evidence,
+   malformed-input testing, migration interruption and concurrent reads/rotation.
+4. Required PQ transport paths, authentication assumptions and deployment boundaries.
+5. Every supplied external finding, including P1-1 through P1-3. Their detailed findings are now tracked in P1_REMEDIATION.md. Forgery rejection and local backup/restore fixes do not close rollback, legacy migration, off-host durability or quorum-custody requirements.
+
+Required deliverables: signed review report referencing an immutable commit,
+severity-ranked findings, remediation commits, independent retest evidence and
+recorded security/release-owner approval. Funding, reviewer appointment and
+acceptance are **pending**. Internal fixes, this checklist and automated test
+success are not substitutes for that review. Other release gates also remain.
+
+See [P1_REMEDIATION.md](P1_REMEDIATION.md) for the authenticated-envelope compatibility break and remaining rollout/rollback/custody gates.
+
+
+## P2 remediation update (2026-10-29)
+
+See [P2_REMEDIATION.md](P2_REMEDIATION.md) for capability configuration, required idempotency headers, administrator MFA reset, staged quotas, evidence and limitations. P2-10 remains partial: metadata caching does not remove all remote crypto calls from transaction locks. Production approval and trusted legacy-envelope migration remain blocked.

@@ -62,13 +62,17 @@ def wrap(data_key: bytes, context: str, key) -> dict:
     ):
         raise ValueError("Unsupported wrapping-key version.")
     if settings.KEY_PROTECTOR == "key-service":
-        result = keyring.service().call(
-            "wrap",
-            organization=str(organization(context)),
-            context=context,
-            dek=b64(data_key),
-            expected=str(key.pk),
-        )
+        try:
+            result = keyring.service().call(
+                "wrap",
+                organization=str(organization(context)),
+                context=context,
+                dek=b64(data_key),
+                expected=str(key.pk),
+            )
+        except (OSError, ValueError):
+            keyring.clear_remote_cache()
+            raise
         protocol.validate(result)
         if result["key_id"] != str(key.pk):
             raise ValueError("Unexpected remote key version.")
@@ -94,7 +98,7 @@ def unwrap(envelope: dict, context: str) -> bytes:
         ):
             raise ValueError("Legacy synthetic envelopes are disabled.")
         return aes_key_unwrap(_local_key(), unb64(envelope["key"]))
-    required = {"v", "suite", "key_id", "kem", "ephemeral", "wrap_nonce", "key", "nonce", "data"}
+    required = protocol.WRAPPER | {"nonce", "data"}
     if set(envelope) != required or envelope["v"] != 2 or envelope["suite"] != keyring.SUITE:
         raise ValueError("Unsupported or downgraded envelope.")
     wrapper = {field: envelope[field] for field in protocol.WRAPPER}

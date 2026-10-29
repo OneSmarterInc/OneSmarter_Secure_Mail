@@ -44,6 +44,10 @@ def compose(client, sender="staff@onesmarter.com", **changes):
         "expiry_days": 7,
     }
     data.update(changes)
+    if data["mode"] == "ordinary" and "expected_route" not in data:
+        preview = post(client, "/routing/preview", data)
+        if preview.status_code == 200:
+            data["expected_route"] = preview.json()
     return post(client, "/conversations", data)
 
 
@@ -106,11 +110,25 @@ def test_assigned_staff_can_read_retained_file_after_recipient_access_ends(staff
 
 
 def test_nophi_requires_explicit_permission(staff_client, staff):
-    result = compose(staff_client, mode="ordinary", body="Meeting", subject="Nophi: notes")
+    result = compose(
+        staff_client,
+        mode="ordinary",
+        body="Meeting",
+        subject="Nophi: notes",
+        nophi_override=True,
+        nophi_acknowledged=True,
+    )
     assert result.status_code == 403
     staff.can_nophi = True
     staff.save()
-    result = compose(staff_client, mode="ordinary", body="Meeting", subject="Nophi: notes")
+    result = compose(
+        staff_client,
+        mode="ordinary",
+        body="Meeting",
+        subject="Nophi: notes",
+        nophi_override=True,
+        nophi_acknowledged=True,
+    )
     assert result.status_code == 201
     assert not Conversation.objects.get(pk=result.json()["id"]).protected
 

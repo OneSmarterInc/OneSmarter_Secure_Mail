@@ -23,6 +23,8 @@ def main():
         "backend.keyservice",
         "serve",
         "--synthetic-only",
+        "--backup-directory",
+        str(ROOT / ".runtime/maintenance/key-backups"),
         "--store",
         str(directory / "store.sqlite3"),
         "--policy",

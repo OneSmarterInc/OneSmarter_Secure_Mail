@@ -47,11 +47,11 @@ Python and browser runtimes cannot guarantee secret zeroization. Disable/restric
 | --- | --- | --- |
 | Wrap DEK | Authenticated workload, organization/resource context, approved suite and DEK; active version selected consistently | Versioned wrapper; no persistent private material |
 | Unwrap DEK | Scoped workload, validated envelope and trusted expected context | DEK only after authentication; generic failure on invalid input; audit safe identifiers |
-| Rewrap DEK | Maintenance identity, source envelope, expected destination/version | Replacement wrapper without exporting DEK; preserve content ciphertext |
+| Rewrap DEK | Organization-scoped workload identity explicitly granted `rewrap`, source envelope, expected destination/version | Replacement wrapper without exporting DEK; preserve content ciphertext |
 | Create/activate version | Separate administrative identity, reason, organization and expected active version | Atomic activation, previous version decrypt-only; verify generated material before activation |
 | Status | Least-privilege operational identity | Readiness, public version/suite metadata and migration health; no secrets |
 
-These are requirements, not invented implemented routes. Before coding, specify versioned schemas, size bounds, error codes, workload identity bootstrap, channel authentication, request replay/idempotency handling, quotas and timeouts. Administrative and runtime permissions must be separate; portal account administrators do not inherit key-custodian privileges. There is no public arbitrary-decrypt or raw-private-key export endpoint.
+The implemented `/v1/` service uses explicit operation allowlists. Workload defaults include wrap, unwrap and rewrap; maintenance defaults include rotate and import. Custodian login alone does not grant runtime operations. Continue reviewing versioned schemas, size bounds, error codes, workload identity bootstrap, channel authentication, request replay/idempotency handling, quotas and timeouts. Administrative and runtime permissions must be separate; portal account administrators do not inherit key-custodian privileges. There is no public arbitrary-decrypt or raw-private-key export endpoint.
 
 Use authenticated protected transport. Mutual authentication alone does not establish post-quantum confidentiality: verify the negotiated approved hybrid key exchange on any connection carrying DEKs or private material. Avoid persistent secret caches initially; introduce caching only with explicit residency, revocation, outage and audit tradeoffs.
 

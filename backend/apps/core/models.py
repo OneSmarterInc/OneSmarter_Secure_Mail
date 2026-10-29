@@ -236,8 +236,8 @@ class AuditExport(models.Model):
 
 class RateBucket(models.Model):
     key = models.CharField(max_length=100, primary_key=True)
-    count = models.PositiveIntegerField(default=0)
-    expires_at = models.DateTimeField()
+    credits = models.BigIntegerField(default=0)
+    refilled_at = models.DateTimeField(null=True)
 
 
 class WrappingKeyVersion(models.Model):

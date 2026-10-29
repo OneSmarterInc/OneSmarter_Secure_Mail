@@ -4,13 +4,17 @@ Updated 2026-10-28. Implemented and locally tested candidate; **production remai
 
 ## Profile and runtime
 
-Network links carrying plaintext or key material use TLS 1.3 with **only X25519MLKEM768**, hostname/CA verification and, for internal services, dedicated client certificates. The shared Python adapter checks the actually negotiated group before sending application data. Session resumption is rejected; session tickets are disabled. Classical-only negotiation fails, rather than being an allowed fallback.
+The specific browser, key-service, remote scanner and recovery-transfer candidate links listed below use TLS 1.3 with **only X25519MLKEM768**, hostname/CA verification and, for internal services, dedicated client certificates. The shared Python adapter checks the actually negotiated group before sending application data. Session resumption is rejected; session tickets are disabled. Classical-only negotiation fails, rather than being an allowed fallback.
 
 This profile uses the public Python 3.15 `SSLContext.set_groups()` and `SSLSocket.group()` APIs with hybrid-capable OpenSSL (3.5 or later). The existing Python 3.12/OpenSSL 3.0 development runtime cannot meet this requirement. Strict mode refuses it. The ignored portable Python used for local verification is a test tool, not a deployed runtime. Candidate container definition: `deploy/Dockerfile.pq`; build, pin/attest its resulting image, and verify compatibility on the target Linux host before release.
 
 Sources: [Python SSL APIs](https://docs.python.org/3.15/library/ssl.html#ssl.SSLContext.set_groups), [OpenSSL supported groups](https://docs.openssl.org/master/man3/SSL_CTX_set1_groups_list/), [standard TLS hybrid exchange](https://www.rfc-editor.org/info/rfc10024/), [NGINX TLS configuration](https://nginx.org/en/docs/http/ngx_http_ssl_module.html).
 
 PQ key exchange addresses connection confidentiality, including recorded-traffic risk. Existing certificate signatures are classical; this does not claim post-quantum authentication against an active quantum attacker. That threat model and authentication transition remain separately reviewed requirements.
+
+## Scope exclusions
+
+PostgreSQL, Redis and SMTP are **not verified post-quantum channels**. Ordinary TLS/STARTTLS on those connections does not make them post-quantum. These systems can carry session data, credentials, OTPs or ordinary-mail plaintext. No claim of complete key-bearing-hop PQ coverage is made. Production remains blocked until the threat model explicitly approves these exclusions or the required paths receive verified hybrid transport. Provider email delivery beyond our SMTP hop is also outside this claim.
 
 ## Connection paths
 

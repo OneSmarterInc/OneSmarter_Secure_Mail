@@ -12,6 +12,7 @@ urlpatterns = [
     path("recipient-api/recipient/verify", mail.verify_code),
     path("recipient-api/recipient/conversation", mail.recipient_conversation),
     path("recipient-api/recipient/attachments", mail.recipient_upload),
+    path("recipient-api/recipient/activity", mail.recipient_activity),
     path("recipient-api/recipient/logout", mail.recipient_logout),
     path("recipient-api/attachments/<uuid:ident>", mail.download),
     path("api/health", views.health),

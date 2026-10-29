@@ -45,6 +45,9 @@ class Compose(serializers.Serializer):
     subject = serializers.CharField(max_length=180, allow_blank=True, default="")
     body = serializers.CharField(max_length=100000, allow_blank=True, default="")
     mode = serializers.ChoiceField(choices=["ordinary", "secure_request"], default="ordinary")
+    nophi_override = serializers.BooleanField(default=False)
+    nophi_acknowledged = serializers.BooleanField(default=False)
+    expected_route = serializers.DictField(required=False)
     expiry_days = serializers.ChoiceField(choices=[1, 7, 30], default=7)
     attachments = serializers.ListField(child=serializers.UUIDField(), max_length=10, default=list)
 
@@ -96,7 +99,9 @@ def attachment_context(attachment):
 
 def active_grant(grant):
     if (
-        grant.revoked_at
+        grant.conversation.owner.status != "active"
+        or not grant.conversation.owner.is_active
+        or grant.revoked_at
         or grant.conversation.revoked_at
         or grant.conversation.expires_at <= timezone.now()
         or not grant.conversation.protected
@@ -220,10 +225,12 @@ def policy(user, data):
     sender = data["sender"].lower()
     if sender not in user.sender_addresses or sender.split("@")[-1] != user.organization.domain:
         raise Problem("This sender address is not authorized.", "sender_denied", 403)
+    if data["nophi_override"] and data["mode"] != "ordinary":
+        raise Problem("Secure requests cannot use Nophi.", "nophi_not_allowed")
     decision = decide_delivery(
         authenticated_sender=sender,
         recipients=data["to"] + data["cc"] + data["bcc"],
-        subject=data["subject"],
+        subject="Nophi" if data["nophi_override"] else "",
         request_secure_information=data["mode"] == "secure_request",
     )
     if decision.reason == "explicit_nophi_override" and not user.can_nophi:
@@ -291,12 +298,32 @@ def conversations(request):
             owner=user, organization=user.organization
         ).prefetch_related("grants")
         search = request.query_params.get("q", "")[:200].strip()
-        if search:
-            query = query.filter(
-                Q(grants__email__icontains=search) | Q(state__icontains=search)
-            ).distinct()
         if request.query_params.get("state"):
             query = query.filter(state=request.query_params["state"])
+        if search:
+            rate_limit(request, "conversation_search", str(user.pk), maximum=10, seconds=60)
+            # No plaintext subject index or search-term persistence. Fail explicitly
+            # rather than return incomplete results when the bounded scan is exceeded.
+            candidates = list(query.order_by("pk")[:1001])
+            if len(candidates) > 1000:
+                raise Problem(
+                    "Search is limited to 1000 conversations. Narrow the state filter.",
+                    "search_scope_too_large",
+                    422,
+                )
+            needle = search.casefold()
+            matches = []
+            for conversation in candidates:
+                subject = crypto.decrypt(
+                    conversation.subject_ciphertext, subject_context(conversation)
+                ).decode()
+                if (
+                    needle in subject.casefold()
+                    or needle in conversation.state.casefold()
+                    or any(needle in grant.email.casefold() for grant in conversation.grants.all())
+                ):
+                    matches.append(conversation.pk)
+            query = query.filter(pk__in=matches)
         items, meta = paginate(
             query,
             request,
@@ -307,10 +334,23 @@ def conversations(request):
     document_service.require_ready()
     data = validate(Compose, request.data)
     decision = policy(user, data)
+
     with transaction.atomic():
         lock_organization(user.organization_id)
         user = current_staff(request)
         decision = policy(user, data)
+        expected = data.get("expected_route")
+        if data["mode"] == "ordinary" and expected != {
+            "protected": decision.protected,
+            "reason": decision.reason,
+        }:
+            raise Problem("Delivery route changed. Review it before sending.", "route_changed", 409)
+        if decision.reason == "explicit_nophi_override" and not data["nophi_acknowledged"]:
+            raise Problem(
+                "Acknowledge that the content will be sent by ordinary email.",
+                "nophi_acknowledgement_required",
+            )
+
         existing, record = idempotency(
             request, user.organization, f"staff:{user.pk}", "compose", data
         )
@@ -403,6 +443,15 @@ def revoke(request, ident):
         lock_organization(conversation.organization_id)
         current_staff(request)
         conversation = Conversation.objects.select_for_update().get(pk=conversation.pk)
+        existing, record = idempotency(
+            request,
+            conversation.organization,
+            f"staff:{request.user.pk}",
+            f"revoke:{ident}",
+            dict(request.data),
+        )
+        if existing:
+            return Response({"revoked": True})
         grant_id = request.data.get("grant_id")
         if grant_id:
             grant = conversation.grants.filter(pk=grant_id).first()
@@ -427,6 +476,7 @@ def revoke(request, ident):
                 "conversation",
                 conversation.pk,
             )
+        IdempotencyRecord.objects.create(**record, resource_id=str(conversation.pk))
     return Response({"revoked": True})
 
 
@@ -659,6 +709,21 @@ def recipient_conversation(request):
 
 
 @endpoint(["POST"])
+def recipient_activity(request):
+    grant = recipient(request)
+    now = timezone.now()
+    updated = RecipientSession.objects.filter(
+        pk=request.session.get("recipient_session"),
+        grant=grant,
+        revoked_at=None,
+        expires_at__gt=now,
+    ).update(expires_at=now + timedelta(minutes=15))
+    if not updated:
+        raise Problem("Verify your email again to continue.", "recipient_session_expired", 401)
+    return Response({"active": True})
+
+
+@endpoint(["POST"])
 def recipient_logout(request):
     ident = request.session.pop("recipient_session", None)
     if ident:
@@ -673,47 +738,83 @@ def upload_for(request, *, user=None, grant=None):
     upload = request.FILES.get("file")
     if not upload or upload.size <= 0 or upload.size > settings.MAX_UPLOAD_BYTES:
         raise Problem("Choose a non-empty file up to 25 MB.")
-    data = upload.read(settings.MAX_UPLOAD_BYTES + 1)
-    if len(data) > settings.MAX_UPLOAD_BYTES:
-        raise Problem("File size limit exceeded.")
-    name, media_type = storage.validate_file(upload.name, data)
-    accepted, method = storage.scan(data)
-    document_service.require_ready()
-    if not accepted:
-        audit(org, user or grant.pk, "attachment.rejected", "upload", "", outcome="denied")
-        raise Problem("This file was rejected by the scanner.", "unsafe_file")
-    attachment = Attachment(
-        organization=org,
-        uploader=user,
-        grant=grant,
-        size=len(data),
-        media_type=media_type,
-        state="available",
-        scan_method=method,
-    )
-    attachment.name_ciphertext = crypto.encrypt(
-        name.encode(), crypto.context(org.pk, "filename", attachment.pk)
-    )
-    attachment.object_key = f"{org.pk}/staged/{attachment.pk}"
-    encrypted = crypto.encrypt(data, attachment_context(attachment)).encode()
-    attachment.stored_size = len(encrypted)
-    storage.put(attachment.object_key, encrypted)
+    from django.db.models import Sum
+
     with transaction.atomic():
         lock_organization(org)
-        if user:
-            current_staff(request)
-        else:
-            recipient(request)
-        attachment.save()
-        audit(
-            org,
-            user or grant.pk,
-            "attachment.uploaded",
-            "attachment",
-            attachment.pk,
-            metadata={"bytes": len(data), "scan_method": method},
+        current_staff(request) if user else recipient(request)
+        staged = (
+            Attachment.objects.filter(
+                organization=org, uploader=user, grant=grant, message__isnull=True
+            )
+            .exclude(state="deleted")
+            .aggregate(total=Sum("size"))["total"]
+            or 0
         )
-    return Response(attachment_data(attachment), status=201)
+        if staged + upload.size > settings.STAGED_UPLOAD_QUOTA_BYTES:
+            raise Problem(
+                "Staged upload quota reached. Submit existing files before uploading more.",
+                "staged_quota",
+                413,
+            )
+        attachment = Attachment(
+            organization=org, uploader=user, grant=grant, size=upload.size, state="pending"
+        )
+        attachment.object_key = f"{org.pk}/staged/{attachment.pk}"
+        attachment.save()
+    try:
+        data = upload.read(settings.MAX_UPLOAD_BYTES + 1)
+        if len(data) > settings.MAX_UPLOAD_BYTES:
+            raise Problem("File size limit exceeded.")
+        name, media_type = storage.validate_file(upload.name, data)
+        accepted, method = storage.scan(data)
+        document_service.require_ready()
+        if not accepted:
+            audit(org, user or grant.pk, "attachment.rejected", "upload", "", outcome="denied")
+            raise Problem("This file was rejected by the scanner.", "unsafe_file")
+        attachment.size = len(data)
+        attachment.media_type = media_type
+        attachment.state = "available"
+        attachment.scan_method = method
+        attachment.name_ciphertext = crypto.encrypt(
+            name.encode(), crypto.context(org.pk, "filename", attachment.pk)
+        )
+        attachment.object_key = f"{org.pk}/staged/{attachment.pk}"
+        encrypted = crypto.encrypt(data, attachment_context(attachment)).encode()
+        attachment.stored_size = len(encrypted)
+        with transaction.atomic():
+            lock_organization(org)
+            if user:
+                current_staff(request)
+            else:
+                recipient(request)
+            if not Attachment.objects.filter(
+                pk=attachment.pk, state="pending", message=None
+            ).exists():
+                raise Problem(
+                    "Upload reservation expired. Please upload again.", "upload_expired", 409
+                )
+            storage.put(attachment.object_key, encrypted)
+            attachment.save()
+            audit(
+                org,
+                user or grant.pk,
+                "attachment.uploaded",
+                "attachment",
+                attachment.pk,
+                metadata={"bytes": len(data), "scan_method": method},
+            )
+        return Response(attachment_data(attachment), status=201)
+    except BaseException:
+        # Reserved bytes are released on failure. Crash reservations remain fail-closed
+        # until the existing staged-upload cleanup procedure removes them.
+        try:
+            storage.remove(attachment.object_key)
+        except Exception:
+            pass  # Keep the reservation and object key for retryable staged cleanup.
+        else:
+            Attachment.objects.filter(pk=attachment.pk, message__isnull=True).delete()
+        raise
 
 
 @endpoint(["POST"], staff=True)

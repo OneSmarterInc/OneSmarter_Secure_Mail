@@ -1,6 +1,8 @@
 """Isolated synthetic browser/accessibility drill; stop all owned child processes."""
 
+import hashlib
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -15,9 +17,15 @@ def main():
     root = Path(__file__).resolve().parents[1]
     (root / ".runtime").mkdir(exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="browser-check-", dir=root / ".runtime"))
+    setup_token, inbox_token = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     env = {
         **os.environ,
         "APP_ENV": "test",
+        "DJANGO_READ_DOT_ENV": "false",
+        "SETUP_TOKEN_SHA256": hashlib.sha256(setup_token.encode()).hexdigest(),
+        "DEV_INBOX_TOKEN_SHA256": hashlib.sha256(inbox_token.encode()).hexdigest(),
+        "E2E_SETUP_TOKEN": setup_token,
+        "E2E_DEV_INBOX_TOKEN": inbox_token,
         "APP_RUNTIME_DIR": str(work),
         "MAIL_PROVIDER": "development",
         "SCAN_PROVIDER": "synthetic",

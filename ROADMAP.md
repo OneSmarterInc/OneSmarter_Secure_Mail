@@ -102,3 +102,31 @@ Portal-boundary verification (2026-10-28): full regression run 125 passed, 12 op
 Completed Connections screen with explanatory service cards, own-account delivery counts, sender-management permission links, refresh and a rate-limited live scanner health check. Backend tests verify account isolation, secret redaction, failed health checks and no email side effects. 35 focused tests passed; full staff/recipient browser flow plus desktop/mobile Connections and accessibility checks passed. Frontend build/format and Ruff lint/Django checks passed. Global Ruff format found a separately added scripts/start_local_maintenance.py formatting issue; this unrelated file was left unchanged.
 
 The user authorized enabling the saved Private Email SMTP profile and resending one captured notification. SMTP authentication succeeded and that notification reached provider_accepted. The running API/worker now use SMTP; previous captured notifications were not bulk-replayed. Inbox receipt is not confirmed, and localhost invitation links still require this computer.
+
+## 29 October 2026 — specification governance and crypto ownership
+
+Retired handoff v1.0 through the repository v1.1 notice; PRD is the product source
+of truth. Production and real-PHI use remain blocked. External review funding,
+named reviewer, detailed P1-1/P1-2/P1-3 reports, remediation/retest and security
+approval are pending. No external review was commissioned by this change.
+
+## 29 October 2026 — P1 remediation
+
+Implemented mandatory origin-MAC wrappers, pre-activation key snapshots and a
+verified restore CLI; explicit off-host-input initialization with synthetic-only
+local-secret exceptions; owner-preserving deactivation enforcement; recipient idle
+activity and memory-only draft retention; explicit Nophi consent/expected-route
+checks; upload progress and backend-driven Connections facts. Full tests: 181
+passed, 13 skipped; focused P1 checks: 6 passed. Existing runtime crypto was not
+restarted or migrated. Legacy authenticity migration, trusted rollback detection,
+real off-host recovery, quorum/HSM custody and independent approval remain open.
+
+
+## P2 remediation update (2026-10-29)
+
+See [P2_REMEDIATION.md](P2_REMEDIATION.md) for capability configuration, required idempotency headers, administrator MFA reset, staged quotas, evidence and limitations. P2-10 remains partial: metadata caching does not remove all remote crypto calls from transaction locks. Production approval and trusted legacy-envelope migration remain blocked.
+
+
+## P3 hardening update
+
+See [P3_REMEDIATION.md](P3_REMEDIATION.md) for stable rotation IDs/expected versions, recipient URL cleanup, bounded encrypted-subject search, and deployment verification limits. Rotation retries must reuse the original operation parameters.

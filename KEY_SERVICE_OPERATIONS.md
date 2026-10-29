@@ -22,11 +22,11 @@ Run commands from the repository root using the installed runtime dependencies. 
 Startup enforces exclusive service ownership using an OS-held `<store>.service.lock` file. Never delete that file to bypass a running owner; stop the owner first. Process termination releases the lock automatically. Use a local filesystem with working OS locks, not a shared network filesystem. A transactional seal epoch additionally invalidates other store objects before their next operation/status check. A failed seal transaction must be treated as an operational failure; already returned DEKs/plaintext cannot be recalled.
 
 ```bash
-python -m backend.keyservice init --store /srv/onesmarter-keys/store.sqlite3 --recovery-file /separate-custody/recovery.txt
+python -m backend.keyservice init --store /srv/onesmarter-keys/store.sqlite3
 python -m backend.keyservice identity --policy /srv/onesmarter-keys/policy.json --cert /pki/custodian.pem --name custodian --role custodian
 python -m backend.keyservice identity --policy /srv/onesmarter-keys/policy.json --cert /pki/workload.pem --name document-worker --role workload --organization ORGANIZATION_UUID
 python -m backend.keyservice identity --policy /srv/onesmarter-keys/policy.json --cert /pki/maintenance.pem --name key-maintenance --role maintenance --organization ORGANIZATION_UUID
-python -m backend.keyservice serve --store /srv/onesmarter-keys/store.sqlite3 --policy /srv/onesmarter-keys/policy.json --cert /pki/server.pem --key /pki/server.key --ca /pki/client-ca.pem --origin https://keys.example.test:8443 --host 127.0.0.1 --port 8443 --synthetic-only
+python -m backend.keyservice serve --store /srv/onesmarter-keys/store.sqlite3 --backup-directory /mounted-independent-backups/onesmarter --policy /srv/onesmarter-keys/policy.json --cert /pki/server.pem --key /pki/server.key --ca /pki/client-ca.pem --origin https://keys.example.test:8443 --host 127.0.0.1 --port 8443 --synthetic-only
 ```
 
 Replace the organization placeholder with its actual UUID. Certificates must be issued through an approved PKI: server SAN must match the HTTPS hostname, server/client EKUs must be appropriate, and clients require a trusted issuing CA. The custodian browser needs its own certificate/private-key credential provisioned through the operating system/browser certificate facility. The application gets a different workload certificate. This runbook does not provision a public hostname, trusted PKI or install browser credentials. Bind/network exposure must match the deployment design; do not bypass mTLS at a reverse proxy.
@@ -86,3 +86,46 @@ Restore a copied encrypted backup into an isolated service, use its matching rec
 The optional browser check uses headless Edge and temporary synthetic certificates: install frontend dependencies, set `RUN_KEY_PORTAL_BROWSER=1`, and run `pytest backend/tests/test_keyservice.py::test_custodian_browser`. It verifies login/unseal/cleared input/seal/logout and creates `.runtime/key-custody.png`. Its certificate-validation bypass is confined to the synthetic browser test.
 
 The local audit chain and SQL triggers are tamper-evident relative to a retained trusted checkpoint, not immutable against host/database owners. External anchoring, audit verification/export, storage-failure alerting and production retention remain outstanding. Also required: independent exact-profile/dependency review, verified PQ transport, production PKI/custodian approval, OS memory hardening, PostgreSQL/deployment fault drills, capacity/availability validation and approved region/retention policy. No production gate is removed by this implementation.
+
+## Rotation backup and off-host custody update (29 October 2026)
+
+Initialization now prompts for a random 32-byte base64 secret generated and kept
+in separate off-host custody. It does not write that secret to the key host.
+A filesystem path outside the store directory is not proof of separate-host custody.
+The old recovery-file mode and localhost bootstrap script require the explicit
+`--allow-local-recovery-synthetic` option; never use that exception for real data.
+Existing local demo custody artifacts have not been moved or deleted by this change.
+
+Serve requires `--backup-directory`. Provision a separately protected off-host
+mounted destination and exercise actual outage/recovery before deployment. Local
+synthetic tests use a same-host directory and do not prove disaster durability.
+Before activating a rotated/imported key or committing root rotation, the store
+creates and fsyncs a complete encrypted-key snapshot from the pending transaction.
+Backup failure aborts activation. A crash after snapshot but before commit can
+leave an extra unused snapshot; reconcile with the protected audit checkpoint,
+not just filename timestamps. No automatic snapshot expiry is introduced.
+
+Restore to a new path only:
+
+```sh
+python -m backend.keyservice restore --backup /backup/snapshot.sqlite3 --destination /recovery/new-store.sqlite3
+```
+
+The CLI prompts for the matching off-host secret, checks SQLite integrity, audit
+consistency and every encrypted private record, then publishes a sealed store.
+It refuses an existing destination. Root-rotation backups need the corresponding
+new secret; retain old custody for retained older backups. A successful local
+restore is not proof that the backup mount is off-host or that the snapshot is
+fresh. External checkpoints and coordinated application/key restoration remain gates.
+
+Custody roadmap: select an independently reviewed threshold-sharing or HSM-backed
+root-unseal design; require M-of-N separate custodians/devices, scoped identities,
+quorum approval/audit, lost-share and compromise recovery, and drills before real
+PHI use. Do not implement ad-hoc Shamir mathematics or claim that a single secret
+and password constitute a quorum. Budget, exact threshold, hardware/provider and
+operator approval remain unresolved.
+
+
+## P3 hardening update
+
+See [P3_REMEDIATION.md](P3_REMEDIATION.md) for stable rotation IDs/expected versions, recipient URL cleanup, bounded encrypted-subject search, and deployment verification limits. Rotation retries must reuse the original operation parameters.

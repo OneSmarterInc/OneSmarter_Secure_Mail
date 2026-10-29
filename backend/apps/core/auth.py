@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from . import crypto
 from .http import Problem, endpoint
 from .models import Organization, StaffInvitation, StaffUser
+from .operator_access import operator_token_valid
 from .services import audit, current_staff, digest, keyed, lock_organization, queue_mail, rate_limit
 
 
@@ -86,7 +87,9 @@ def recipient_session(request):
 
 @endpoint(["POST"])
 def setup(request):
-    if not settings.SYNTHETIC_MODE or request.META.get("REMOTE_ADDR") not in {"127.0.0.1", "::1"}:
+    if not settings.SYNTHETIC_MODE or not operator_token_valid(
+        request.data.get("setup_token", ""), settings.SETUP_TOKEN_SHA256
+    ):
         raise Problem("Setup is unavailable.", status=404)
     rate_limit(request, "bootstrap", maximum=5)
     data = validate(Credentials, request.data)

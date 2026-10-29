@@ -1,5 +1,6 @@
 """Provision synthetic localhost custody, never production identity or recovery material."""
 
+import argparse
 import hashlib
 import json
 import os
@@ -23,6 +24,9 @@ from backend.keyservice.store import KeyStore  # noqa: E402
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--allow-local-recovery-synthetic", action="store_true", required=True)
+    parser.parse_args()
     directory = ROOT / ".runtime/maintenance"
     custody = ROOT / ".runtime/maintenance-credentials"
     if directory.exists() or custody.exists():

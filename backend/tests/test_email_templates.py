@@ -31,7 +31,9 @@ def test_email_rejects_active_link():
 
 
 @pytest.mark.django_db
-def test_notification_has_plain_text_and_html_without_document_contents(staff_client, settings):
+def test_notification_has_plain_text_and_html_without_document_contents(
+    staff_client, settings, sender_profile
+):
     settings.MAIL_PROVIDER = "smtp"
     settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
     settings.EMAIL_HOST_USER = "test-only"

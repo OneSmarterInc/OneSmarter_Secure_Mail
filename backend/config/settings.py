@@ -1,11 +1,15 @@
 """Explicit synthetic development configuration; production requires reviewed providers."""
 
 import os
+from ipaddress import ip_address
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
+from .environment import load_environment
+
 BASE_DIR = Path(__file__).resolve().parents[2]
+load_environment(BASE_DIR)
 RUNTIME_DIR = Path(os.environ.get("APP_RUNTIME_DIR", str(BASE_DIR / ".runtime")))
 ENVIRONMENT = os.environ.get("APP_ENV", "development")
 SYNTHETIC_MODE = ENVIRONMENT in {"development", "test"}
@@ -28,6 +32,14 @@ ENABLE_DEV_TOOLS = SYNTHETIC_MODE and os.environ.get("ENABLE_DEV_TOOLS", "false"
 ENABLE_LEGACY_RECIPIENT_API = (
     SYNTHETIC_MODE and os.environ.get("ENABLE_LEGACY_RECIPIENT_API", "false") == "true"
 )
+# Trust exact immediate proxy peers only; never arbitrary forwarded chains.
+TRUSTED_PROXY_IPS = frozenset(
+    str(ip_address(value.strip()))
+    for value in os.environ.get("TRUSTED_PROXY_IPS", "").split(",")
+    if value.strip()
+)
+# Only for an exclusively Unix-socket-bound backend with restricted socket ownership.
+TRUSTED_PROXY_UNIX_SOCKET = os.environ.get("TRUSTED_PROXY_UNIX_SOCKET", "false") == "true"
 COMPANY_DOMAIN = "onesmarter.com"
 INSTALLED_APPS = [
     "django.contrib.auth",
@@ -103,6 +115,11 @@ REST_FRAMEWORK = {
 }
 DATA_UPLOAD_MAX_MEMORY_SIZE = 27 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 26 * 1024 * 1024
+SETUP_TOKEN_SHA256 = os.environ.get("SETUP_TOKEN_SHA256", "")
+DEV_INBOX_TOKEN_SHA256 = os.environ.get("DEV_INBOX_TOKEN_SHA256", "")
+STAGED_UPLOAD_QUOTA_BYTES = int(os.environ.get("STAGED_UPLOAD_QUOTA_BYTES", str(100 * 1024 * 1024)))
+FILE_UPLOAD_MAX_MEMORY_SIZE = 1024 * 1024
+
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_FILES = 10
 CRYPTO_PROVIDER = "onesmarter-hybrid-v2"
@@ -120,10 +137,10 @@ KEY_SERVICE_URL = os.environ.get("KEY_SERVICE_URL", "")
 KEY_SERVICE_CA = os.environ.get("KEY_SERVICE_CA", "")
 KEY_SERVICE_CERT = os.environ.get("KEY_SERVICE_CERT", "")
 KEY_SERVICE_KEY = os.environ.get("KEY_SERVICE_KEY", "")
-KEY_STATUS_URL = os.environ.get("KEY_STATUS_URL", KEY_SERVICE_URL)
-KEY_STATUS_CA = os.environ.get("KEY_STATUS_CA", KEY_SERVICE_CA)
-KEY_STATUS_CERT = os.environ.get("KEY_STATUS_CERT", KEY_SERVICE_CERT)
-KEY_STATUS_KEY = os.environ.get("KEY_STATUS_KEY", KEY_SERVICE_KEY)
+KEY_STATUS_URL = os.environ.get("KEY_STATUS_URL") or KEY_SERVICE_URL
+KEY_STATUS_CA = os.environ.get("KEY_STATUS_CA") or KEY_SERVICE_CA
+KEY_STATUS_CERT = os.environ.get("KEY_STATUS_CERT") or KEY_SERVICE_CERT
+KEY_STATUS_KEY = os.environ.get("KEY_STATUS_KEY") or KEY_SERVICE_KEY
 KEY_STATUS_REQUIRE_PQ = (
     PQ_TRANSPORT_REQUIRED or os.environ.get("KEY_STATUS_REQUIRE_PQ", "false") == "true"
 )
@@ -156,6 +173,7 @@ if PQ_TRANSPORT_REQUIRED:
     SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = True
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 MAIL_PROVIDER = os.environ.get("MAIL_PROVIDER", "development" if SYNTHETIC_MODE else "smtp")
+SMTP_SENDER_PROFILES_FILE = os.environ.get("SMTP_SENDER_PROFILES_FILE", "")
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "mail.privateemail.com")
 EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")

@@ -51,6 +51,7 @@ class AccountAction(serializers.Serializer):
             "cancel_invitation",
             "recovery",
             "revoke_sessions",
+            "reset_mfa",
         ]
     )
     reason = serializers.CharField(max_length=300)
@@ -177,6 +178,12 @@ def validate_privileges(actor, data):
     ):
         if not actor.can_manage_privileges:
             raise Problem("Privilege-management permission is required.", "privilege_denied", 403)
+    if data.get("sender_addresses") and not actor.can_manage_privileges:
+        raise Problem(
+            "Privilege-management permission is required for sender addresses.",
+            "privilege_denied",
+            403,
+        )
     addresses = [email.lower() for email in data.get("sender_addresses", [])]
     if any(email.split("@")[-1] != actor.organization.domain for email in addresses):
         raise Problem("Sender addresses must belong to the company domain.")
@@ -298,6 +305,11 @@ def account_detail(request, ident):
         if actor.role != "admin":
             raise Problem("Administrator access is required.", status=403)
         target = StaffUser.objects.select_for_update().get(pk=target.pk)
+        existing, record = idempotency(
+            request, actor.organization, f"staff:{actor.pk}", f"account:{target.pk}", data
+        )
+        if existing:
+            return Response({"updated": True})
         before = {"role": target.role, "status": target.status, "can_nophi": target.can_nophi}
         if action in {"suspend", "deactivate", "permissions"}:
             removes_admin = action != "permissions" or data.get("role", target.role) != "admin"
@@ -377,6 +389,19 @@ def account_detail(request, ident):
             StaffInvitation.objects.filter(user=target, consumed_at=None).update(
                 consumed_at=timezone.now()
             )
+        elif action == "reset_mfa":
+            if not actor.can_manage_privileges or target.pk == actor.pk:
+                raise Problem("A different privileged administrator must reset MFA.", status=403)
+            if target.status != "active":
+                raise Problem("MFA reset requires an active account.")
+            target.mfa_secret = ""
+            target.mfa_confirmed = False
+            target.mfa_last_tick = -1
+            target.recovery_hashes = []
+            target.session_version += 1
+            StaffInvitation.objects.filter(user=target, consumed_at=None).update(
+                consumed_at=timezone.now()
+            )
         elif action == "revoke_sessions":
             target.session_version += 1
         elif action == "resend":
@@ -395,6 +420,7 @@ def account_detail(request, ident):
                 raise Problem("Recovery requires an active account.")
             invite(target, actor, purpose="password_recovery")
         target.save()
+        IdempotencyRecord.objects.create(**record, resource_id=str(target.pk))
         audit(
             actor.organization,
             actor,

@@ -4,6 +4,7 @@ import argparse
 import getpass
 import hashlib
 import json
+import os
 import secrets
 import time
 from pathlib import Path
@@ -22,7 +23,11 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init")
     init.add_argument("--store", type=Path, required=True)
-    init.add_argument("--recovery-file", type=Path, required=True)
+    init.add_argument("--recovery-file", type=Path)
+    init.add_argument("--allow-local-recovery-synthetic", action="store_true")
+    restore = commands.add_parser("restore")
+    restore.add_argument("--backup", type=Path, required=True)
+    restore.add_argument("--destination", type=Path, required=True)
     backup = commands.add_parser("backup")
     backup.add_argument("--store", type=Path, required=True)
     backup.add_argument("--destination", type=Path, required=True)
@@ -35,6 +40,7 @@ def main():
     identity.add_argument("--days", type=int, default=30)
     serve = commands.add_parser("serve")
     serve.add_argument("--store", type=Path, required=True)
+    serve.add_argument("--backup-directory", type=Path, required=True)
     serve.add_argument("--policy", type=Path, required=True)
     serve.add_argument("--cert", required=True)
     serve.add_argument("--key", required=True)
@@ -47,20 +53,40 @@ def main():
     serve.add_argument("--allow-http-loopback-origin", action="store_true")
     args = parser.parse_args()
     if args.command == "init":
-        store, recovery = args.store.resolve(), args.recovery_file.resolve()
-        if recovery.is_relative_to(store.parent):
-            parser.error("Keep the recovery file outside the key-store directory.")
-        if store.exists() or recovery.exists():
-            parser.error("Refusing to overwrite a store or recovery secret.")
-        secret = secrets.token_bytes(32)
-        recovery.parent.mkdir(parents=True, exist_ok=True)
-        with recovery.open("x", encoding="ascii") as stream:
-            stream.write(p.encode(secret))
-        recovery.chmod(0o600)
+        store = args.store.resolve()
+        if store.exists():
+            parser.error("Refusing to overwrite a store")
+        if args.recovery_file:
+            if not args.allow_local_recovery_synthetic:
+                parser.error(
+                    "Local recovery-file generation requires --allow-local-recovery-synthetic. Use off-host custody for the normal initialization flow."
+                )
+            recovery = args.recovery_file.resolve()
+            if recovery.is_relative_to(store.parent) or recovery.exists():
+                parser.error("Recovery path must be new and outside the store directory")
+            secret = secrets.token_bytes(32)
+            recovery.parent.mkdir(parents=True, exist_ok=True)
+            with os.fdopen(
+                os.open(recovery, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
+                "w",
+                encoding="ascii",
+            ) as stream:
+                stream.write(p.encode(secret))
+            recovery.chmod(0o600)
+        else:
+            encoded = getpass.getpass(
+                "Secret generated and retained in off-host custody (base64, 32 bytes): "
+            )
+            confirmation = getpass.getpass("Confirm off-host secret: ")
+            if not secrets.compare_digest(encoded, confirmation):
+                parser.error("Secret confirmation failed")
+            secret = p.decode(encoded, 32)
         KeyStore.initialize(store, secret)
-        print(
-            "Initialized sealed store. Secure the separate recovery file; its value was not printed."
-        )
+        print("Initialized sealed store. Keep recovery custody independent of this host.")
+    elif args.command == "restore":
+        secret = p.decode(getpass.getpass("Off-host backup recovery secret: "), 32)
+        KeyStore.restore(args.backup, args.destination, secret)
+        print("Verified backup restored to a new SEALED store; original backup preserved.")
     elif args.command == "backup":
         KeyStore(args.store).backup(args.destination)
         print("Created encrypted SQLite backup. Retain its matching recovery secret separately.")
@@ -94,13 +120,15 @@ def main():
         args.policy.parent.mkdir(parents=True, exist_ok=True)
         # Policy changes are offline operations; do not run concurrent policy writers.
         tmp = args.policy.with_suffix(".new")
-        with tmp.open("x", encoding="utf-8") as stream:
+        with os.fdopen(
+            os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8"
+        ) as stream:
             json.dump(policy, stream, indent=2)
         tmp.chmod(0o600)
         tmp.replace(args.policy)
         print("Identity registered. Policy is reloaded on every service request.")
     else:
-        store = KeyStore(args.store)
+        store = KeyStore(args.store, args.backup_directory)
         if args.allow_http_loopback_origin and args.host not in {"127.0.0.1", "localhost"}:
             parser.error("HTTP development origins require a loopback-only service bind.")
         service = Service(

@@ -15,7 +15,12 @@ def needs_rewrap(value, key_id):
     if not value:
         return False
     envelope = json.loads(value)
-    return envelope.get("v") != 2 or envelope.get("key_id") != str(key_id)
+    return (
+        envelope.get("v") != 2
+        or envelope.get("auth_v") != 1
+        or "auth" not in envelope
+        or envelope.get("key_id") != str(key_id)
+    )
 
 
 def migrate(org, *, apply=False, limit=100):

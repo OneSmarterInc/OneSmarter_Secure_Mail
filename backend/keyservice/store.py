@@ -7,12 +7,13 @@ detects changes relative to an independently retained checkpoint, not host root.
 
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -45,10 +46,11 @@ def key_aad(org: str, ident: str) -> bytes:
 
 
 class KeyStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, backup_directory: Path | None = None):
         if not path.is_file():
             raise ValueError("Initialize the key store before starting it.")
         self.path = path
+        self.backup_directory = backup_directory or path.parent / (path.stem + "-backups")
         self.lock = threading.RLock()
         self.root: bytes | None = None
         self.root_id: str | None = None
@@ -60,7 +62,7 @@ class KeyStore:
         if len(unlock_secret) != 32:
             raise ValueError("Use a random 32-byte unlock secret.")
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("xb"):
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"):
             pass
         path.chmod(0o600)
         root_id = str(uuid.uuid4())
@@ -99,6 +101,7 @@ class KeyStore:
             db = sqlite3.connect(self.path, timeout=10)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA synchronous=FULL")
+            db.execute("PRAGMA secure_delete=ON")
             try:
                 db.execute("BEGIN IMMEDIATE")
                 yield db
@@ -248,7 +251,14 @@ class KeyStore:
             if previous:
                 if previous["digest"] != digest:
                     raise ConflictError("Request identifier was already used.")
-                return json.loads(previous["result"])
+                original = json.loads(previous["result"])
+                # A later rotation may have retired this operation's key. Replay
+                # must never publish stale "active" metadata to the application.
+                return self._metadata(
+                    db.execute(
+                        "SELECT * FROM versions WHERE id=? AND org=?", (original["id"], org)
+                    ).fetchone()
+                )
             active = db.execute(
                 "SELECT id FROM versions WHERE org=? AND state='active'", (org,)
             ).fetchone()
@@ -270,6 +280,7 @@ class KeyStore:
                 "INSERT INTO requests VALUES (?,?,?)",
                 (request_id, digest, p.canonical(result).decode()),
             )
+            self._checkpoint(db)
             return result
 
     def import_version(self, org: str, ident: str, raw: bytes, actor: str) -> dict:
@@ -290,6 +301,7 @@ class KeyStore:
                 (ident, org, "decrypt_only", protect(self.root, raw, key_aad(org, ident))),
             )
             self._audit(db, actor, "import", org, ident)
+            self._checkpoint(db)
             return self._metadata(
                 db.execute("SELECT * FROM versions WHERE id=?", (ident,)).fetchone()
             )
@@ -363,8 +375,22 @@ class KeyStore:
                     (protect(new_secret, root, ident.encode()),),
                 )
                 self._audit(db, actor, "rotate_root", ident=ident)
+                self._checkpoint(db)
             self.root, self.root_id = root, ident
-            return {"root_id": ident}
+            # Rotation is committed. Report cleanup independently; never imply rollback.
+            sanitized = False
+            try:
+                with closing(sqlite3.connect(self.path, timeout=10, isolation_level=None)) as clean:
+                    clean.execute("PRAGMA secure_delete=ON")
+                    checkpoint = clean.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                    if checkpoint[0] == 0:
+                        clean.execute("VACUUM")
+                        sanitized = (
+                            clean.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+                        )
+            except sqlite3.Error:
+                pass
+            return {"root_id": ident, "storage_cleanup_complete": sanitized}
 
     def custody_status(self) -> dict:
         with self.transaction() as db:
@@ -375,11 +401,71 @@ class KeyStore:
                 "suite": p.SUITE,
             }
 
+    def _checkpoint(self, db):
+        """Durable snapshot of pending keys BEFORE the live transaction can commit."""
+        self.backup_directory.mkdir(parents=True, exist_ok=True)
+        destination = self.backup_directory / f"{time.time_ns()}-{uuid.uuid4()}.sqlite3"
+        with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"):
+            pass
+        destination.chmod(0o600)
+        try:
+            with closing(sqlite3.connect(destination)) as target:
+                target.execute("PRAGMA synchronous=FULL")
+                # Dump from this transaction sees its uncommitted rotation. Opening
+                # another source connection would silently omit the pending key.
+                target.executescript("\n".join(db.iterdump()))
+                if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise ValueError("Backup verification failed")
+            with destination.open("r+b") as stream:
+                os.fsync(stream.fileno())
+            if os.name != "nt":
+                fd = os.open(self.backup_directory, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
+
+    @classmethod
+    def restore(cls, source: Path, destination: Path, secret: bytes):
+        """Restore only to a new path, verifying custody and every private record."""
+        if not source.is_file() or destination.exists():
+            raise ValueError("Backup must exist and restore destination must be new")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".restore-{uuid.uuid4()}.sqlite3")
+        with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"):
+            pass
+        temporary.chmod(0o600)
+        try:
+            with (
+                closing(sqlite3.connect(source)) as original,
+                closing(sqlite3.connect(temporary)) as target,
+            ):
+                if original.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise ValueError("Backup integrity failed")
+                original.backup(target)
+            recovered = cls(temporary)
+            recovered.unseal(secret, "offline-restore-verification")
+            recovered.seal("offline-restore-complete")
+            # Atomic non-overwriting publication on the same filesystem.
+            if os.name == "nt":
+                os.rename(temporary, destination)  # Windows refuses an existing destination.
+            else:
+                os.link(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return cls(destination)
+
     def backup(self, destination: Path):
         """Offline CLI operation; backup is encrypted and never returned over runtime API."""
         with self.lock:
-            with destination.open("xb"):
+            with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"):
                 pass
             destination.chmod(0o600)
-            with sqlite3.connect(self.path) as source, sqlite3.connect(destination) as target:
+            with (
+                closing(sqlite3.connect(self.path)) as source,
+                closing(sqlite3.connect(destination)) as target,
+            ):
                 source.backup(target)

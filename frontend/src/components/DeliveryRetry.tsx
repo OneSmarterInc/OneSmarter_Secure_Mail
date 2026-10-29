@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ApiError, post } from "../api";
 import { ErrorNotice, Modal, StepUp } from "./ui";
 
@@ -13,11 +13,17 @@ export function DeliveryRetry({
   const [stepUp, setStepUp] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const retryKey = useRef(crypto.randomUUID());
   async function retry() {
     setBusy(true);
     setError("");
     try {
-      await post(`/delivery/${id}/retry`, { acknowledge_duplicate_risk: true });
+      await post(
+        `/delivery/${id}/retry`,
+        { acknowledge_duplicate_risk: true },
+        retryKey.current,
+      );
+      retryKey.current = crypto.randomUUID();
       setOpen(false);
       onRetried();
     } catch (err) {

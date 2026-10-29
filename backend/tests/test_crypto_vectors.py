@@ -114,11 +114,25 @@ def reference_wrap(raw, ident, dek, context):
     cipher = AES.new(reference_key(shared, sx, header, context), AES.MODE_GCM, nonce=nonce)
     cipher.update(reference_header(header) + b"\x00" + context.encode())
     value, tag = cipher.encrypt_and_digest(dek)
-    return {**header, "wrap_nonce": encode(nonce), "key": encode(value + tag)}
+    result = {**header, "wrap_nonce": encode(nonce), "key": encode(value + tag), "auth_v": 1}
+    from Cryptodome.Hash import HMAC
+
+    mac_key = HKDF(raw, 32, b"", SHA256, context=b"onesmarter:wrapper-origin:hmac-sha256:v1")
+    result["auth"] = encode(
+        HMAC.new(mac_key, reference_header(result) + b"\0" + context.encode(), SHA256).digest()
+    )
+    return result
 
 
 def reference_unwrap(raw, wrapper, context):
     decode = base64.b64decode
+    from Cryptodome.Hash import HMAC
+
+    mac_key = HKDF(raw, 32, b"", SHA256, context=b"onesmarter:wrapper-origin:hmac-sha256:v1")
+    signed = {k: v for k, v in wrapper.items() if k != "auth"}
+    HMAC.new(mac_key, reference_header(signed) + b"\0" + context.encode(), SHA256).verify(
+        decode(wrapper["auth"])
+    )
     _, dk = ML_KEM_768.key_derive(raw[:64])
     shared = ML_KEM_768.decaps(dk, decode(wrapper["kem"]))
     sx = DH.key_agreement(

@@ -96,7 +96,9 @@ def test_queued_delivery_waits_and_resumes(staff_client, monkeypatch):
     assert job.state == "development_delivered"
 
 
-def test_sealing_before_smtp_defers_without_sending(staff_client, monkeypatch, settings):
+def test_sealing_before_smtp_defers_without_sending(
+    staff_client, monkeypatch, settings, sender_profile
+):
     from backend.apps.core import mail
 
     assert compose(staff_client).status_code == 201

@@ -4,12 +4,13 @@ from django.db.models import Count
 from django.utils import timezone
 from rest_framework.response import Response
 
-from . import document_service, storage
+from . import document_service, senders, storage
 from .auth import recent_mfa
 from .http import Problem, endpoint, unavailable
 from .mail import payload
-from .models import Conversation, DeliveryJob
-from .services import audit, current_staff, lock_organization, rate_limit
+from .models import Conversation, DeliveryJob, IdempotencyRecord
+from .operator_access import operator_token_valid
+from .services import audit, current_staff, idempotency, lock_organization, rate_limit
 
 
 @endpoint(["GET"])
@@ -64,9 +65,20 @@ def connection_settings(request):
             "mail": settings.MAIL_PROVIDER,
             "storage": settings.STORAGE_PROVIDER,
             "scanner": settings.SCAN_PROVIDER,
-            "smtp_configured": bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD),
+            "smtp_configured": senders.configured(settings.DEFAULT_FROM_EMAIL),
             "archive_configured": bool(settings.AUDIT_BUCKET),
             "crypto": settings.CRYPTO_PROVIDER,
+            "document_encryption": "AES-256-GCM"
+            if settings.CRYPTO_PROVIDER == "onesmarter-hybrid-v2"
+            else None,
+            "key_service_ready": document_service.ready(),
+            "storage_configured": (
+                settings.STORAGE_PROVIDER == "local"
+                and settings.RUNTIME_DIR.is_dir()
+                or settings.STORAGE_PROVIDER == "s3"
+                and bool(settings.S3_BUCKET and settings.AWS_REGION)
+            ),
+            "antivirus_enabled": settings.SCAN_PROVIDER == "clamav",
             "production_ready": False,
             "gates": [
                 "Independent review of OneSmarter key management",
@@ -98,6 +110,15 @@ def retry_delivery(request, ident):
     with transaction.atomic():
         lock_organization(request.user.organization_id)
         current_staff(request)
+        existing, record = idempotency(
+            request,
+            request.user.organization,
+            f"staff:{request.user.pk}",
+            f"retry_delivery:{ident}",
+            dict(request.data),
+        )
+        if existing:
+            return Response({"queued": True})
         job = (
             DeliveryJob.objects.select_for_update()
             .filter(pk=ident, organization=request.user.organization, actor=request.user)
@@ -109,6 +130,7 @@ def retry_delivery(request, ident):
             raise Problem(
                 "This notification cannot be retried. Create a fresh invitation if its secret expired."
             )
+        IdempotencyRecord.objects.create(**record, resource_id=str(job.pk))
         job.state, job.next_attempt = "retry", timezone.now()
         job.save()
         audit(
@@ -123,10 +145,12 @@ def development_inbox(request):
         not settings.SYNTHETIC_MODE
         or not settings.ENABLE_DEV_TOOLS
         or settings.MAIL_PROVIDER != "development"
-        or request.META.get("REMOTE_ADDR") not in {"127.0.0.1", "::1"}
+        or not operator_token_valid(
+            request.headers.get("X-Dev-Inbox-Token", ""), settings.DEV_INBOX_TOKEN_SHA256
+        )
     ):
         unavailable()
-    # Deliberately accessible only in loopback synthetic mode, like a local mail catcher.
+    # Explicit operator capability is required even behind a loopback proxy.
     jobs = (
         DeliveryJob.objects.filter(state="development_delivered")
         .exclude(payload_ciphertext="")

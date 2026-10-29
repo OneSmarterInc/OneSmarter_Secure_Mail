@@ -73,8 +73,9 @@ element("rotate").addEventListener("submit", (event) => {
     if (element("new-secret").value !== element("confirm-secret").value) throw new Error("Recovery keys do not match.");
     const data = {secret: element("new-secret").value.trim(), expected: rootId};
     element("new-secret").value = element("confirm-secret").value = "";
-    try { await request("/v1/rotate-root", data); } finally { data.secret = ""; }
-    element("backup-confirm").checked = false; await refresh(); feedback("Root protection rotated. Preserve old backup recovery material separately.");
+    let result;
+    try { result = await request("/v1/rotate-root", data); } finally { data.secret = ""; }
+    element("backup-confirm").checked = false; await refresh(); feedback(result.storage_cleanup_complete ? "Root protection rotated and live database cleaned. Preserve old backup recovery material separately." : "Root protection rotated, but live database cleanup is incomplete. Operator maintenance is required; do not repeat rotation. Preserve backup recovery material.");
   });
 });
 element("logout").addEventListener("click", () => {

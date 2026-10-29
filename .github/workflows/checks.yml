@@ -17,6 +17,19 @@ jobs:
       - run: python scripts/init_local.py
       - run: python scripts/check_pq_transport.py
       - run: pytest backend/tests/test_keyservice.py backend/tests/test_pq_transport.py -q
+  proxy:
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: test
+      REQUIRE_NGINX_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: sudo apt-get update && sudo apt-get install -y nginx
+      - run: pip install -r requirements.lock
+      - run: python scripts/init_local.py
+      - run: pytest backend/tests/test_rate_limits.py backend/tests/test_proxy_integration.py -q
   backend:
     runs-on: ubuntu-latest
     services:

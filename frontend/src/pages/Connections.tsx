@@ -11,6 +11,10 @@ import {
 interface Settings {
   mail: string;
   smtp_configured: boolean;
+  storage_configured: boolean;
+  document_encryption: string | null;
+  key_service_ready: boolean;
+  antivirus_enabled: boolean;
   storage: string;
   scanner: string;
   crypto: string;
@@ -91,7 +95,7 @@ export function Connections() {
                   <p>
                     {data.mail === "development"
                       ? "Notifications are captured locally and are not sent to recipients. Previously captured notifications will not be sent automatically when email is enabled."
-                      : "SMTP credentials are missing. Ask your service administrator to configure email delivery."}
+                      : "An approved company sender and its SMTP credentials are not configured. Ask your service administrator to configure email delivery."}
                   </p>
                 </div>
               </div>
@@ -134,7 +138,11 @@ export function Connections() {
                   <span className="icon-tile">
                     <Icon name="file" />
                   </span>
-                  <Badge>Configured</Badge>
+                  <Badge tone={data.storage_configured ? "neutral" : "warning"}>
+                    {data.storage_configured
+                      ? "Configuration present"
+                      : "Not configured"}
+                  </Badge>
                 </div>
                 <h2>Document storage</h2>
                 <p>
@@ -175,18 +183,20 @@ export function Connections() {
                         : "neutral"
                     }
                   >
-                    {check
-                      ? check.scanner.status === "healthy"
-                        ? "Health check passed"
-                        : "Unavailable or signatures stale"
-                      : "Not checked"}
+                    {!data.antivirus_enabled
+                      ? "Antivirus disabled"
+                      : check
+                        ? check.scanner.status === "healthy"
+                          ? "Health check passed"
+                          : "Unavailable or signatures stale"
+                        : "Not checked"}
                   </Badge>
                 </div>
                 <h2>Upload protection</h2>
                 <p>
-                  Files must pass antivirus scanning before they become
-                  available. Unavailable scanners and stale signatures block new
-                  uploads.
+                  {data.antivirus_enabled
+                    ? "Uploads require ClamAV scanning. Files are rejected if the scanner is unavailable or its signatures are stale."
+                    : "Antivirus scanning is not enabled. Synthetic validation is not a malware scan."}
                 </p>
                 <dl className="connection-facts">
                   <div>
@@ -208,7 +218,10 @@ export function Connections() {
                     <dd>{data.signature_max_age_hours} hours</dd>
                   </div>
                 </dl>
-                <button onClick={() => void checkScanner()} disabled={checking}>
+                <button
+                  onClick={() => void checkScanner()}
+                  disabled={checking || !data.antivirus_enabled}
+                >
                   {checking ? "Checking scanner…" : "Check scanner health"}
                 </button>
                 {check && (
@@ -226,7 +239,11 @@ export function Connections() {
                   <span className="icon-tile">
                     <Icon name="lock" />
                   </span>
-                  <Badge>Configured</Badge>
+                  <Badge tone={data.key_service_ready ? "neutral" : "warning"}>
+                    {data.key_service_ready
+                      ? "Key service ready"
+                      : "Key service unavailable"}
+                  </Badge>
                 </div>
                 <h2>Encryption & access</h2>
                 <p>
@@ -236,7 +253,10 @@ export function Connections() {
                 <dl className="connection-facts">
                   <div>
                     <dt>Document encryption</dt>
-                    <dd>AES-256-GCM</dd>
+                    <dd>
+                      {data.document_encryption ||
+                        "Unsupported encryption configuration"}
+                    </dd>
                   </div>
                   <div>
                     <dt>Key protection</dt>

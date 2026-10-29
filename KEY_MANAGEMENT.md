@@ -79,7 +79,7 @@ This exact hybrid composition is project-specific and requires protocol review a
 Optional rewrapping unwraps the existing DEK and wraps it using the new version. It preserves the original DEK, content ciphertext and content nonce byte for byte; it verifies the old content before committing. Tests check this explicitly. Rewrapping an S3 object still transfers/writes the envelope object; it does not imply zero I/O.
 
 ```powershell
-.\.venv\Scripts\python.exe manage.py rotate_wrapping_key --organization <UUID> --reason "Scheduled rotation"
+.\.venv\Scripts\python.exe manage.py rotate_wrapping_key --organization <UUID> --reason "Scheduled rotation" --request-id <OPERATION_UUID> --expected-active <ACTIVE_KEY_UUID_OR_none>
 .\.venv\Scripts\python.exe manage.py rewrap_keys --organization <UUID> --limit 100
 .\.venv\Scripts\python.exe manage.py rewrap_keys --organization <UUID> --limit 100 --apply
 ```

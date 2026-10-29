@@ -80,10 +80,24 @@ export default defineConfig(({ command }) => {
         "/recipient-api": {
           target: process.env.API_TARGET || "http://127.0.0.1:8000",
           changeOrigin: false,
+          configure(proxy) {
+            proxy.on("proxyReq", (proxyReq, req) => {
+              proxyReq.setHeader("X-Real-IP", req.socket.remoteAddress || "");
+              proxyReq.removeHeader("X-Forwarded-For");
+              proxyReq.removeHeader("Forwarded");
+            });
+          },
         },
         "/api": {
           target: process.env.API_TARGET || "http://127.0.0.1:8000",
           changeOrigin: false,
+          configure(proxy) {
+            proxy.on("proxyReq", (proxyReq, req) => {
+              proxyReq.setHeader("X-Real-IP", req.socket.remoteAddress || "");
+              proxyReq.removeHeader("X-Forwarded-For");
+              proxyReq.removeHeader("Forwarded");
+            });
+          },
         },
       },
     },

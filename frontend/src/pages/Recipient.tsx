@@ -1,10 +1,14 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, post } from "../api";
-import type { Conversation } from "../types";
+import { api, post, ApiError } from "../api";
+import type { Conversation, FileItem } from "../types";
 import { Brand, ErrorNotice, Icon, Loading } from "../components/ui";
 import { ReplyForm, ThreadContent } from "./Mail";
 
 export function Recipient({ token }: { token: string }) {
+  const [draft, setDraft] = useState<{ body: string; files: FileItem[] }>({
+    body: "",
+    files: [],
+  });
   const [landing, setLanding] = useState<{
     organization: string;
     recipient: string;
@@ -20,6 +24,25 @@ export function Recipient({ token }: { token: string }) {
     setConversation(null);
     setError("");
     setStage("landing");
+    setDraft({ body: "", files: [] });
+    if (!token) {
+      void api<Conversation>("/recipient/conversation")
+        .then((value) => {
+          if (live) {
+            setConversation(value);
+            setStage("read");
+          }
+        })
+        .catch(() => {
+          if (live) {
+            setStage("unavailable");
+            setError("Open your latest invitation email to verify again.");
+          }
+        });
+      return () => {
+        live = false;
+      };
+    }
     post<{ organization: string; recipient: string }>("/recipient/landing", {
       token,
     })
@@ -43,27 +66,68 @@ export function Recipient({ token }: { token: string }) {
   }, [cooldown]);
   useEffect(() => {
     if (stage !== "read") return;
+    const controller = new AbortController();
     const expire = () => {
       setConversation(null);
-      setStage("code");
+      setStage(token ? "code" : "unavailable");
       setError(
         "Your access ended. Verify again if the invitation is still active.",
       );
     };
     window.addEventListener("session-expired", expire);
     const timer = setInterval(() => {
-      void api<Conversation>("/recipient/conversation")
-        .then(setConversation)
-        .catch(() => {
+      void api<Conversation>("/recipient/conversation", {
+        signal: controller.signal,
+      })
+        .then((value) => {
+          if (!controller.signal.aborted) setConversation(value);
+        })
+        .catch((err: unknown) => {
+          if (controller.signal.aborted) return;
           setConversation(null);
-          setStage("unavailable");
+          setStage(
+            !token || (err instanceof ApiError && err.status === 404)
+              ? "unavailable"
+              : "code",
+          );
+          setError((err as Error).message);
+          if (err instanceof ApiError && err.status === 404)
+            setDraft({ body: "", files: [] });
         });
     }, 60000);
     return () => {
+      controller.abort();
       clearInterval(timer);
       window.removeEventListener("session-expired", expire);
     };
-  }, [stage]);
+  }, [stage, token]);
+  useEffect(() => {
+    if (stage !== "read") return;
+    let last = 0;
+    let pending = false;
+    const active = () => {
+      if (pending || Date.now() - last < 60000) return;
+      last = Date.now();
+      pending = true;
+      void post("/recipient/activity")
+        .catch((err: unknown) => {
+          if (err instanceof ApiError && err.status === 404) {
+            setConversation(null);
+            setStage("unavailable");
+            setDraft({ body: "", files: [] });
+          }
+        })
+        .finally(() => {
+          pending = false;
+        });
+    };
+    window.addEventListener("keydown", active);
+    window.addEventListener("pointerdown", active);
+    return () => {
+      window.removeEventListener("keydown", active);
+      window.removeEventListener("pointerdown", active);
+    };
+  }, [stage, token]);
   async function requestCode() {
     setBusy(true);
     setError("");
@@ -83,6 +147,13 @@ export function Recipient({ token }: { token: string }) {
     setError("");
     try {
       await post("/recipient/verify", { token, code });
+      // Replace this history entry; keep the token only in component memory for
+      // idle-session re-verification. Reload resumes from the HttpOnly session.
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + "#/conversation",
+      );
       setCode("");
       setConversation(await api<Conversation>("/recipient/conversation"));
       setStage("read");
@@ -97,7 +168,11 @@ export function Recipient({ token }: { token: string }) {
       setConversation(await api<Conversation>("/recipient/conversation"));
     } catch (err) {
       setConversation(null);
-      setStage("unavailable");
+      setStage(
+        err instanceof ApiError && err.status === 404 ? "unavailable" : "code",
+      );
+      if (err instanceof ApiError && err.status === 404)
+        setDraft({ body: "", files: [] });
       setError((err as Error).message);
     }
   }
@@ -106,7 +181,8 @@ export function Recipient({ token }: { token: string }) {
       await post("/recipient/logout");
     } finally {
       setConversation(null);
-      setStage("landing");
+      setDraft({ body: "", files: [] });
+      setStage(token ? "landing" : "unavailable");
     }
   }
   return (
@@ -129,8 +205,9 @@ export function Recipient({ token }: { token: string }) {
             </span>
             <h1>This message is unavailable</h1>
             <p>
-              Access may have expired or been revoked. Contact the sender if you
-              need a new invitation.
+              A newer reply may have replaced this link. Try the latest
+              notification. Access may also have expired or been revoked;
+              contact the sender if needed.
             </p>
           </div>
         ) : conversation ? (
@@ -147,6 +224,8 @@ export function Recipient({ token }: { token: string }) {
             <ReplyForm
               conversation={conversation}
               recipientMode
+              draft={draft}
+              onDraftChange={setDraft}
               onSent={() => void refresh()}
             />
           </>

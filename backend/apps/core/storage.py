@@ -24,7 +24,7 @@ def put(key: str, value: bytes):
             ServerSideEncryption="AES256",
             ContentType="application/octet-stream",
         )
-    elif settings.SYNTHETIC_MODE:
+    elif settings.STORAGE_PROVIDER == "local":
         path = settings.RUNTIME_DIR / "objects" / hashlib.sha256(key.encode()).hexdigest()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Never expose a partially written ciphertext after a failed write.
@@ -49,7 +49,7 @@ def get(key: str) -> bytes:
             .get_object(Bucket=settings.S3_BUCKET, Key=key)["Body"]
             .read()
         )
-    if settings.SYNTHETIC_MODE:
+    if settings.STORAGE_PROVIDER == "local":
         return (
             settings.RUNTIME_DIR / "objects" / hashlib.sha256(key.encode()).hexdigest()
         ).read_bytes()
@@ -61,7 +61,7 @@ def remove(key: str):
         boto3.client("s3", region_name=settings.AWS_REGION).delete_object(
             Bucket=settings.S3_BUCKET, Key=key
         )
-    elif settings.SYNTHETIC_MODE:
+    elif settings.STORAGE_PROVIDER == "local":
         (settings.RUNTIME_DIR / "objects" / hashlib.sha256(key.encode()).hexdigest()).unlink(
             missing_ok=True
         )

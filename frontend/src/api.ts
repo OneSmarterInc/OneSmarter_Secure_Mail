@@ -168,3 +168,76 @@ export const bytes = (value: number) =>
     : value < 1048576
       ? `${(value / 1024).toFixed(1)} KB`
       : `${(value / 1048576).toFixed(1)} MB`;
+
+export function uploadFile<T>(
+  path: string,
+  file: File,
+  progress: (percent: number) => void,
+  signal: AbortSignal,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    if (signal.aborted) {
+      reject(new DOMException("Cancelled", "AbortError"));
+      return;
+    }
+    signal.addEventListener("abort", abort, { once: true });
+    xhr.open("POST", apiBase + path);
+    xhr.withCredentials = true;
+    xhr.timeout = 120000;
+    const cookie = document.cookie
+      .split("; ")
+      .find((part) => part.startsWith("csrftoken="))
+      ?.slice(10);
+    const token = cookie ? decodeURIComponent(cookie) : csrf;
+    if (token) xhr.setRequestHeader("X-CSRFToken", token);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable)
+        progress(Math.floor((event.loaded / event.total) * 100));
+    };
+    xhr.onloadend = () => signal.removeEventListener("abort", abort);
+    xhr.onerror = () =>
+      reject(
+        new ApiError(
+          "Upload connection failed. Try again.",
+          "upload_failed",
+          0,
+        ),
+      );
+    xhr.ontimeout = () =>
+      reject(
+        new ApiError(
+          "Upload timed out. Check before retrying.",
+          "upload_timeout",
+          0,
+        ),
+      );
+    xhr.onabort = () => reject(new DOMException("Cancelled", "AbortError"));
+    xhr.onload = () => {
+      let body;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        reject(
+          new ApiError("Invalid upload response.", "upload_failed", xhr.status),
+        );
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        if (xhr.status === 401)
+          window.dispatchEvent(new CustomEvent("session-expired"));
+        reject(
+          new ApiError(
+            errorText(body?.error?.message || body?.error),
+            String(body?.error?.code || "upload_failed"),
+            xhr.status,
+          ),
+        );
+      } else resolve(body as T);
+    };
+    const form = new FormData();
+    form.append("file", file);
+    xhr.send(form);
+  });
+}

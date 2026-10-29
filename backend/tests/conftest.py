@@ -1,4 +1,5 @@
 import base64
+import json
 import secrets
 import time
 
@@ -14,10 +15,13 @@ from backend.keyservice.protocol import SUITE
 def isolated_storage(settings, tmp_path, monkeypatch):
     # Unit flows use a ready service fixture; admission tests override this response.
     monkeypatch.setattr(document_service, "read_status", lambda: {"sealed": False, "suite": SUITE})
+    settings.TRUSTED_PROXY_IPS = set()
+    settings.TRUSTED_PROXY_UNIX_SOCKET = False
     settings.RUNTIME_DIR = tmp_path
     settings.LOCAL_KEY_FILE = tmp_path / "key"
     settings.LOCAL_KEY_FILE.write_text(base64.b64encode(secrets.token_bytes(32)).decode())
     settings.MAIL_PROVIDER = "development"
+    settings.SMTP_SENDER_PROFILES_FILE = ""
     settings.SCAN_PROVIDER = "synthetic"
     settings.ENABLE_DEV_TOOLS = True
     settings.ENABLE_LEGACY_RECIPIENT_API = True
@@ -81,3 +85,24 @@ def admin_client(admin):
 @pytest.fixture
 def staff_client(staff):
     return authenticated(staff)
+
+
+@pytest.fixture
+def sender_profile(settings, tmp_path, monkeypatch):
+    settings.MAIL_PROVIDER = "smtp"
+    settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+    settings.DEFAULT_FROM_EMAIL = "secure@onesmarter.com"
+    settings.SMTP_SENDER_PROFILES_FILE = str(tmp_path / "senders.json")
+    monkeypatch.setenv("SMTP_PASSWORD_TEST", "synthetic-test-only")
+    profiles = {
+        address: {
+            "host": "smtp.example.test",
+            "port": 587,
+            "username": address,
+            "password_env": "SMTP_PASSWORD_TEST",
+            "security": "starttls",
+        }
+        for address in ["secure@onesmarter.com", "staff@onesmarter.com"]
+    }
+    (tmp_path / "senders.json").write_text(json.dumps(profiles))
+    return profiles
