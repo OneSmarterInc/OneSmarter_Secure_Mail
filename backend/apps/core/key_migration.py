@@ -25,7 +25,7 @@ def needs_rewrap(value, key_id):
 
 def migrate(org, *, apply=False, limit=100):
     active = keyring.active_key(org.pk)
-    totals = {"candidates": 0, "updated": 0}
+    totals = {"candidates": 0, "updated": 0, "skipped_legacy": 0, "skipped_invalid": 0}
     specs = [
         (Conversation, "organization", [("subject_ciphertext", subject_context)]),
         (Message, "conversation__organization", [("body_ciphertext", message_context)]),
@@ -61,6 +61,27 @@ def migrate(org, *, apply=False, limit=100):
                     )
                 obj = model.objects.select_for_update().get(pk=ident)
                 updates = {}
+                if model is Attachment and obj.state == "deleted":
+                    continue
+                try:
+                    originals = [getattr(obj, field) for field, _ in fields]
+                    original_file = (
+                        storage.get(obj.object_key).decode() if model is Attachment else None
+                    )
+                    if original_file:
+                        originals.append(original_file)
+                    parsed = [json.loads(value) for value in originals if value]
+                    if any(not isinstance(value, dict) for value in parsed):
+                        raise ValueError("Invalid envelope")
+                    if any(
+                        value.get("v") == 2 and (value.get("auth_v") != 1 or "auth" not in value)
+                        for value in parsed
+                    ):
+                        totals["skipped_legacy"] += 1
+                        continue
+                except (ValueError, UnicodeError):
+                    totals["skipped_invalid"] += 1
+                    continue
                 for field, context_fn in fields:
                     original = getattr(obj, field)
                     if needs_rewrap(original, active.pk):
@@ -68,7 +89,6 @@ def migrate(org, *, apply=False, limit=100):
                             crypto.rewrap(original, context_fn(obj)) if apply else original
                         )
                 if model is Attachment:
-                    original_file = storage.get(obj.object_key).decode()
                     if needs_rewrap(original_file, active.pk):
                         if apply:
                             envelope = crypto.rewrap(

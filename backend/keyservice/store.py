@@ -8,6 +8,7 @@ detects changes relative to an independently retained checkpoint, not host root.
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -45,22 +46,41 @@ def key_aad(org: str, ident: str) -> bytes:
     )
 
 
+def validate_new_secret(secret: bytes) -> None:
+    """Reject obvious weak inputs; this cannot prove randomness.
+
+    Generate 32 bytes with a CSPRNG. Legacy unseal remains available for rotation.
+    """
+    if (
+        len(secret) != 32
+        or len(set(secret)) < 16
+        or all(32 <= byte <= 126 for byte in secret)
+        or all(
+            (secret[i] - secret[i - 1]) % 256 == (secret[1] - secret[0]) % 256
+            for i in range(2, len(secret))
+        )
+    ):
+        raise ValueError("Use 32 cryptographically random bytes for new recovery custody.")
+
+
 class KeyStore:
     def __init__(self, path: Path, backup_directory: Path | None = None):
         if not path.is_file():
             raise ValueError("Initialize the key store before starting it.")
         self.path = path
-        self.backup_directory = backup_directory or path.parent / (path.stem + "-backups")
+        self.backup_directory = backup_directory
         self.lock = threading.RLock()
         self.root: bytes | None = None
         self.root_id: str | None = None
         self.seal_epoch: str | None = None
         self.audit_integrity = "unchecked"
+        self.pending_snapshots: list[Path] = []
 
     @classmethod
-    def initialize(cls, path: Path, unlock_secret: bytes) -> "KeyStore":
-        if len(unlock_secret) != 32:
-            raise ValueError("Use a random 32-byte unlock secret.")
+    def initialize(
+        cls, path: Path, unlock_secret: bytes, *, backup_directory: Path | None = None
+    ) -> "KeyStore":
+        validate_new_secret(unlock_secret)
         path.parent.mkdir(parents=True, exist_ok=True)
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"):
             pass
@@ -93,7 +113,7 @@ class KeyStore:
                     ),
                 ],
             )
-        return cls(path)
+        return cls(path, backup_directory)
 
     @contextmanager
     def transaction(self):
@@ -108,7 +128,39 @@ class KeyStore:
                 db.commit()
             except BaseException:
                 db.rollback()
+                for snapshot in self.pending_snapshots:
+                    snapshot.unlink(missing_ok=True)
+                self.pending_snapshots.clear()
                 raise
+            else:
+                # Only committed snapshots are eligible for automatic recovery.
+                # A crash before publication leaves .pending files for operator review.
+                try:
+                    for snapshot in self.pending_snapshots:
+                        snapshot.replace(snapshot.with_suffix(".sqlite3"))
+                    if self.pending_snapshots:
+                        committed = sorted(
+                            path
+                            for path in self.backup_directory.glob("*.sqlite3")
+                            if re.fullmatch(r"[0-9]+-[0-9a-f-]{36}\.sqlite3", path.name)
+                        )
+                        for obsolete in committed[:-3]:
+                            if obsolete.is_symlink():
+                                raise OSError("Refusing symlink snapshot")
+                            obsolete.unlink()
+                        if os.name != "nt":
+                            fd = os.open(self.backup_directory, os.O_RDONLY)
+                            try:
+                                os.fsync(fd)
+                            finally:
+                                os.close(fd)
+                except OSError as exc:
+                    self.root = None
+                    raise OSError(
+                        "Keys committed but backup publication failed; store sealed"
+                    ) from exc
+                finally:
+                    self.pending_snapshots.clear()
             finally:
                 db.close()
 
@@ -306,6 +358,18 @@ class KeyStore:
                 db.execute("SELECT * FROM versions WHERE id=?", (ident,)).fetchone()
             )
 
+    def _record_mfa_dek(self, db, context: str, dek: bytes) -> None:
+        if ":mfa=" not in context:
+            return
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS mfa_current (context TEXT PRIMARY KEY, digest TEXT NOT NULL)"
+        )
+        fingerprint = hashlib.sha256(b"mfa-dek\0" + context.encode() + dek).hexdigest()
+        db.execute(
+            "INSERT INTO mfa_current VALUES (?,?) ON CONFLICT(context) DO UPDATE SET digest=excluded.digest",
+            (context, fingerprint),
+        )
+
     def wrap(self, org: str, context: str, dek: bytes, expected: str, actor: str) -> dict:
         with self.transaction() as db:
             self._ready(db)
@@ -317,7 +381,10 @@ class KeyStore:
             if row is None or row["id"] != expected:
                 raise ConflictError("Active version changed.")
             result = p.wrap(dek, context, row["id"], self._private(row))
+            self._record_mfa_dek(db, context, dek)
             self._audit(db, actor, "wrap", org, row["id"])
+            if ":mfa=" in context:
+                self._checkpoint(db)
             return result
 
     def _unwrap(self, db, org: str, context: str, wrapper: dict) -> bytes:
@@ -329,7 +396,20 @@ class KeyStore:
         ).fetchone()
         if row is None:
             raise ValueError("Unknown version.")
-        return p.unwrap(wrapper, context, self._private(row))
+        dek = p.unwrap(wrapper, context, self._private(row))
+        if ":mfa=" in context:
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mfa_current'"
+            ).fetchone():
+                raise ValueError("MFA envelope needs trusted re-enrollment")
+            current = db.execute(
+                "SELECT digest FROM mfa_current WHERE context=?", (context,)
+            ).fetchone()
+            if current is None or not secrets.compare_digest(
+                current[0], hashlib.sha256(b"mfa-dek\0" + context.encode() + dek).hexdigest()
+            ):
+                raise ValueError("MFA enrollment is stale or unregistered")
+        return dek
 
     def unwrap(self, org: str, context: str, wrapper: dict, actor: str) -> bytes:
         with self.transaction() as db:
@@ -337,6 +417,19 @@ class KeyStore:
             dek = self._unwrap(db, org, context, wrapper)
             self._audit(db, actor, "unwrap", org, wrapper["key_id"])
             return dek
+
+    def unwrap_batch(self, org: str, items: list, actor: str) -> list[bytes]:
+        if not isinstance(items, list) or not 1 <= len(items) <= 25:
+            raise ValueError("Batch must contain 1 to 25 envelopes")
+        with self.transaction() as db:
+            self._ready(db)
+            results = []
+            for item in items:
+                if not isinstance(item, dict) or set(item) != {"context", "wrapper"}:
+                    raise ValueError("Invalid batch item")
+                results.append(self._unwrap(db, org, item["context"], item["wrapper"]))
+            self._audit(db, actor, "unwrap_batch", org, str(len(items)))
+            return results
 
     def rewrap(self, org: str, context: str, wrapper: dict, expected: str, actor: str) -> dict:
         with self.transaction() as db:
@@ -348,14 +441,29 @@ class KeyStore:
             if row is None or row["id"] != expected:
                 raise ConflictError("Active version changed.")
             result = p.wrap(dek, context, row["id"], self._private(row))
+            self._record_mfa_dek(db, context, dek)
             self._audit(db, actor, "rewrap", org, row["id"])
+            if ":mfa=" in context:
+                self._checkpoint(db)
             return result
 
     def rotate_root(self, new_secret: bytes, expected: str, actor: str) -> dict:
         """Atomic root rotation: interruption rolls back all ciphertext and header changes."""
-        if len(new_secret) != 32:
-            raise ValueError("Invalid unlock secret.")
+        validate_new_secret(new_secret)
         with self.lock:
+            if self.backup_directory is None:
+                raise ValueError(
+                    "Configure an explicit independent backup destination before rotation"
+                )
+            old_snapshots = (
+                [
+                    path
+                    for path in self.backup_directory.iterdir()
+                    if re.fullmatch(r"[0-9]+-[0-9a-f-]{36}\.(sqlite3|pending)", path.name)
+                ]
+                if self.backup_directory.exists()
+                else []
+            )
             with self.transaction() as db:
                 self._ready(db)
                 if self.root_id != expected:
@@ -377,6 +485,16 @@ class KeyStore:
                 self._audit(db, actor, "rotate_root", ident=ident)
                 self._checkpoint(db)
             self.root, self.root_id = root, ident
+            # The new committed snapshot retains every private version under the
+            # new root. Retire managed old-root copies only after publication.
+            snapshots_retired = True
+            for snapshot in old_snapshots:
+                try:
+                    if snapshot.is_symlink():
+                        raise OSError("Refusing symlink backup")
+                    snapshot.unlink(missing_ok=True)
+                except OSError:
+                    snapshots_retired = False
             # Rotation is committed. Report cleanup independently; never imply rollback.
             sanitized = False
             try:
@@ -390,7 +508,11 @@ class KeyStore:
                         )
             except sqlite3.Error:
                 pass
-            return {"root_id": ident, "storage_cleanup_complete": sanitized}
+            return {
+                "root_id": ident,
+                "storage_cleanup_complete": sanitized and snapshots_retired,
+                "snapshot_cleanup_complete": snapshots_retired,
+            }
 
     def custody_status(self) -> dict:
         with self.transaction() as db:
@@ -403,8 +525,20 @@ class KeyStore:
 
     def _checkpoint(self, db):
         """Durable snapshot of pending keys BEFORE the live transaction can commit."""
-        self.backup_directory.mkdir(parents=True, exist_ok=True)
-        destination = self.backup_directory / f"{time.time_ns()}-{uuid.uuid4()}.sqlite3"
+        if self.backup_directory is None:
+            raise ValueError(
+                "Configure an explicit independent backup destination before changing keys"
+            )
+        if self.backup_directory.is_symlink() or self.path.resolve().is_relative_to(
+            self.backup_directory.resolve()
+        ):
+            raise ValueError(
+                "Backup destination must be a dedicated directory separate from the live store"
+            )
+        self.backup_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name != "nt" and self.backup_directory.stat().st_mode & 0o077:
+            raise ValueError("Backup directory permissions must be restricted to its owner (0700)")
+        destination = self.backup_directory / f"{time.time_ns()}-{uuid.uuid4()}.pending"
         with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"):
             pass
         destination.chmod(0o600)
@@ -427,10 +561,13 @@ class KeyStore:
         except BaseException:
             destination.unlink(missing_ok=True)
             raise
+        self.pending_snapshots.append(destination)
 
     @classmethod
     def restore(cls, source: Path, destination: Path, secret: bytes):
         """Restore only to a new path, verifying custody and every private record."""
+        if source.suffix == ".pending":
+            raise ValueError("Uncommitted snapshot requires reconciliation; restore refused")
         if not source.is_file() or destination.exists():
             raise ValueError("Backup must exist and restore destination must be new")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -449,6 +586,13 @@ class KeyStore:
             recovered = cls(temporary)
             recovered.unseal(secret, "offline-restore-verification")
             recovered.seal("offline-restore-complete")
+            # Publish a standalone database, never a main file with pending WAL.
+            with closing(sqlite3.connect(temporary, isolation_level=None)) as checkpoint:
+                if checkpoint.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] != 0:
+                    raise ValueError("Restore checkpoint was busy")
+                checkpoint.execute("PRAGMA journal_mode=DELETE")
+            with temporary.open("r+b") as stream:
+                os.fsync(stream.fileno())
             # Atomic non-overwriting publication on the same filesystem.
             if os.name == "nt":
                 os.rename(temporary, destination)  # Windows refuses an existing destination.

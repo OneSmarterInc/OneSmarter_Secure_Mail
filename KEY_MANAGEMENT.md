@@ -9,7 +9,7 @@ The application owns envelope formats, context binding, key-version records, rot
 Implemented candidate modules (all synthetic-only until review):
 
 - `backend/apps/core/crypto.py`: data encryption/decryption, hybrid data-key wrapping, strict supported-suite checks and rewrapping.
-- `backend/keyservice/protocol.py`: shared OSM-v2 implementation for both the local synthetic adapter and isolated service. ML-KEM-768 encapsulation and ephemeral X25519 agreement feed context-bound HKDF-SHA256; AES-256-GCM wraps the fresh document DEK. The format is unchanged, so existing valid v2 envelopes remain readable.
+- `backend/keyservice/protocol.py`: shared OSM-v2 implementation for both the local synthetic adapter and isolated service. ML-KEM-768 encapsulation and ephemeral X25519 agreement feed context-bound HKDF-SHA256; AES-256-GCM wraps the fresh document DEK. Authenticated v2 envelopes require `auth_v=1` and the wrapper MAC. Earlier unauthenticated v2 records are rejected; migration skips and reports them rather than silently adding authentication. Recover their content only from independently trusted original sources.
 - `backend/apps/core/keyring.py`: tenant-scoped version creation, root-key protection, private/public consistency checks and active/decrypt-only lifecycle.
 - `backend/apps/core/key_migration.py`: bounded, resumable migration of stored envelopes.
 - `backend/apps/core/models.py`: `WrappingKeyVersion`, with a database constraint permitting only one active version per organization.
@@ -103,3 +103,21 @@ Version 1 was an earlier synthetic AES-only format. Existing synthetic data can 
 Version 2 executes actual ML-KEM-768 in the stored-data-key wrapping path. That alone does not establish PQ protection for browser/ingress, the future internal key-service connection, remote scanning, authentication or backup/recovery. Scope email credential risks separately. Verify required transport hops and reject silent downgrade; follow the coverage matrix in KEY_SERVICE_ARCHITECTURE.md. No badge or configuration boolean removes the production gate.
 
 Algorithm/API references: [Cryptography ML-KEM documentation](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/mlkem/), [NIST FIPS 203](https://csrc.nist.gov/pubs/fips/203/final), [RFC 7748](https://www.rfc-editor.org/rfc/rfc7748.html), and [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869.html). Installed interfaces were exercised locally; independent protocol/implementation evidence remains pending.
+
+
+## 29 October review remediation and rollout
+
+See [V2_REMEDIATION.md](V2_REMEDIATION.md) for exact status and test evidence.
+Key mutations require an explicit backup directory. Configure independently operated off-host storage; a different local folder does not satisfy disaster recovery. Managed snapshots retain three committed generations per root; root rotation publishes a full new-root snapshot before retiring managed old-root generations (including stale pending copies). All wrapping private versions remain in the current store and newest snapshot, so document retention is unchanged. Monitor `snapshot_cleanup_complete` and `storage_cleanup_complete`; a false result is an unresolved incident, not successful cryptographic erasure. Offline copies, storage snapshots, SSD remnants and remote replica retention require an operator inventory and coordinated retirement.
+
+Snapshots are prepared as `.pending` and published only after the live SQLite commit. A failed transaction removes its pending copy. A crash between commit and publication requires operator reconciliation against the live store; automatic restore refuses pending files. Restore checkpoints the destination WAL before atomic publication. Snapshot creation still copies the full audit history under the store lock; large-history performance and independent checkpointing remain release work.
+
+The isolated key service now pins the current MFA data-key digest per enrollment context in its own database. A fresh data key replaces the pin; old application-database MFA enrollments are rejected. Rewrapping retains the same data key, so a failed application migration does not invalidate its previous wrapper. This does not protect against rollback of the entire key-service database or theft of application runtime credentials. Local-development mode does not provide this separate trust boundary. Existing service MFA envelopes without pins require trusted re-enrollment, not trust-on-first-read. A service update and application update are coordinated maintenance, not a blind restart.
+
+### Trusted recovery of unauthenticated legacy content
+
+1. Inventory affected records with the dry-run migration and preserve the originals, associated key versions and backups for investigation.
+2. Obtain the original plaintext from its trusted owner/source; confirm provenance and content outside the untrusted legacy store. Do not decrypt-and-re-MAC old unauthenticated wrappers as proof of provenance.
+3. For documents, the authorized sender/recipient re-submits the trusted original using the existing authenticated upload-and-reply flow. This runs validation, real scanning when configured, fresh envelope encryption and audit recording. Preserve the old record identifier in the operator incident record; do not overwrite historical submissions.
+4. Recreate messages from the verified original source as explicit new submissions. Reset MFA through the privileged administrator workflow and emailed recovery link; issue fresh invitation/OTP notifications instead of importing old secrets.
+5. Verify staff retrieval and new authenticated envelopes before closing each inventory item. The migration's skipped counters must be reconciled; there is no automated bypass or unsigned legacy-envelope conversion command.

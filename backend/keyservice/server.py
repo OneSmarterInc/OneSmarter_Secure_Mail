@@ -29,7 +29,7 @@ from .store import ConflictError, KeyStore, SealedError
 
 logger = logging.getLogger(__name__)
 
-MAX_BODY = 16384
+MAX_BODY = 131072
 ROOT_OPERATIONS = {"unseal", "seal", "custody-status", "rotate-root"}
 FIELDS = {
     "versions": {"organization"},
@@ -37,6 +37,7 @@ FIELDS = {
     "import": {"organization", "key_id", "private"},
     "wrap": {"organization", "context", "dek", "expected"},
     "unwrap": {"organization", "context", "wrapper"},
+    "unwrap-batch": {"organization", "items"},
     "rewrap": {"organization", "context", "wrapper", "expected"},
     "unseal": {"secret"},
     "seal": set(),
@@ -80,6 +81,23 @@ class Service:
         self.rates: dict[str, tuple[float, int]] = {}
         self.denial_window = 0.0
         self.denial_count = 0
+        self.denials: dict[tuple[str, str], int] = {}
+
+    def flush_denials(self, *, force=False):
+        with self.lock:
+            now = time.monotonic()
+            if not self.denials or (not force and now - self.denial_window < 60):
+                return
+            # Keep counters until their durable write succeeds.
+            for (actor, event), count in list(self.denials.items()):
+                try:
+                    self.store.record_event(actor, f"denial_batch:{event}:count={count}")
+                except Exception:
+                    logger.error("key_service_denial_audit_unavailable")
+                    return
+                del self.denials[(actor, event)]
+            self.denial_count = 0
+            self.denial_window = now
 
     def identity(self, fingerprint: str) -> dict:
         policy = strict_json(self.policy.read_bytes())
@@ -147,7 +165,8 @@ class Service:
         optional = {"active", "after"} if op == "versions" else set()
         if op not in FIELDS or not FIELDS[op] <= set(data) or set(data) - FIELDS[op] - optional:
             raise ValueError("Unsupported operation or fields.")
-        if op not in identity.get("operations", []):
+        permission = "unwrap" if op == "unwrap-batch" else op
+        if permission not in identity.get("operations", []):
             raise PermissionError("Operation denied.")
         if op in ROOT_OPERATIONS and identity.get("role") != "custodian":
             raise PermissionError("Custodian required.")
@@ -190,6 +209,12 @@ class Service:
             return self.store.wrap(
                 org, data["context"], p.decode(data["dek"], 32), data["expected"], actor
             )
+        if op == "unwrap-batch":
+            return {
+                "deks": [
+                    p.encode(value) for value in self.store.unwrap_batch(org, data["items"], actor)
+                ]
+            }
         if op == "unwrap":
             return {
                 "dek": p.encode(self.store.unwrap(org, data["context"], data["wrapper"], actor))
@@ -228,11 +253,18 @@ class Handler(BaseHTTPRequestHandler):
         if not cert:
             raise PermissionError("Client certificate required.")
         fp = hashlib.sha256(cert).hexdigest()
+        self.peer_fingerprint = fp
         service = self.server.service
-        # Before policy lookup and any durable denial audit; global cap bounds memory.
-        service.throttle("all-peers", 3000)
-        service.throttle("peer:" + fp, 600)
-        return fp, service.identity(fp)
+        # Revoked/unlisted identities must never consume authorized workloads' budget.
+        identity = service.identity(fp)
+        # Bulk search/list traffic has its own budget and cannot exhaust unwrap,
+        # login or custodial operations through the shared workload certificate.
+        if self.path == "/v1/unwrap-batch":
+            service.throttle("bulk:" + fp, 120)
+        else:
+            service.throttle("all-peers", 3000)
+            service.throttle("peer:" + fp, 600)
+        return fp, identity
 
     def do_GET(self):
         try:
@@ -257,7 +289,6 @@ class Handler(BaseHTTPRequestHandler):
         op, identity = "invalid", None
         try:
             fp, identity = self.peer()
-            service.throttle("request:" + fp, 600)
             if (
                 self.headers.get("Transfer-Encoding")
                 or len(self.headers.get_all("Content-Length", [])) != 1
@@ -328,22 +359,19 @@ class Handler(BaseHTTPRequestHandler):
             self.response(503, {"error": "service_unavailable", "incident_id": incident})
 
     def audit_failure(self, identity, event):
-        try:
-            service = self.server.service
-            with service.lock:
-                service.denial_count += 1
-                now = time.monotonic()
-                if now - service.denial_window < 60:
-                    return
-                count = service.denial_count
-                service.denial_count = 0
-                service.denial_window = now
-            # At most one denial batch per minute, outside the service lock.
-            service.store.record_event("denial_batch", f"{event}:count={count}")
-        except Exception:
-            # Denial remains fail-closed even if the audit store is unavailable.
-            # Deployment monitoring must alert on storage failures independently.
-            pass
+        service = self.server.service
+        actor = (
+            identity["name"]
+            if identity
+            else "certificate:" + getattr(self, "peer_fingerprint", "unknown")
+        )
+        with service.lock:
+            key = (actor, event)
+            if key not in service.denials and len(service.denials) >= 128:
+                key = ("overflow-unlisted-identities", "access_denied")
+            service.denials[key] = service.denials.get(key, 0) + 1
+            service.denial_count += 1
+        service.flush_denials()
 
 
 class Server(ThreadingMixIn, HTTPServer):
@@ -362,10 +390,14 @@ class Server(ThreadingMixIn, HTTPServer):
             self.ownership.close()
             raise
 
+    def service_actions(self):
+        self.service.flush_denials()
+
     def server_close(self):
         try:
             # Wait for request threads before allowing another service owner.
             super().server_close()
+            self.service.flush_denials(force=True)
         finally:
             self.ownership.close()
 

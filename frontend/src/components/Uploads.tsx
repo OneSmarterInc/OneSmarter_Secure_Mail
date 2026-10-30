@@ -64,7 +64,7 @@ export function Uploads({
         } catch (err) {
           setProgress((items) =>
             items.map((item, i) =>
-              i === index ? { ...item, rejected: true } : item,
+              i >= index ? { ...item, rejected: true } : item,
             ),
           );
           throw err;
@@ -105,7 +105,19 @@ export function Uploads({
           aria-label="Upload attachments"
         />
       </label>
-      <div role="status" aria-live="polite">
+      {busy && (
+        <button type="button" onClick={() => controller.current?.abort()}>
+          Cancel upload
+        </button>
+      )}
+      <p role="status" aria-live="polite">
+        {busy
+          ? "Upload in progress"
+          : progress.length
+            ? "Upload finished. Review file results below."
+            : ""}
+      </p>
+      <div>
         {progress.map((item, index) => (
           <div key={index}>
             <span>

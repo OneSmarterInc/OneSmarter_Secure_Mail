@@ -30,18 +30,33 @@ workers after editing; changing a file does not update running process settings.
   status-only certificate, private key and CA. Unsealing is still separate.
 - SMTP remains the previously authorized Private Email profile, port 587 with
   STARTTLS, using `info@kormic.ai`. Running a worker can send queued mail.
-- `EMAIL_HOST_PASSWORD` is empty; `EMAIL_HOST_PASSWORD_FILE` points to the existing
-  protected `.runtime/smtp.password`. Do not fill both. The SMTP username is
-  configuration, not a password.
+- `EMAIL_HOST_PASSWORD` is the only SMTP password setting. Supply a newly rotated
+  credential in the private root `.env`, or inject it into the process environment.
+  It is intentionally blank pending provider-side rotation. No password-file fallback exists.
 - `DJANGO_SECRET_KEY` is empty, preserving the existing `.runtime/django.secret`.
   `POSTGRES_PASSWORD` is an empty placeholder for native SQLite development.
 - Unseal/recovery/root keys must never be copied into `.env` or `.env.example`.
 
-The old `.runtime/mail.env` is preserved for compatibility with
-`scripts/with_mail.py`; that explicit legacy launcher passes process variables
-and therefore overrides matching root-file settings. Prefer ordinary Django
-commands with the root `.env` as the single local configuration source.
-The local restart helper now uses this root file rather than loading mail.env.
+Legacy SMTP profile loaders are retired. `scripts/with_mail.py` now uses the same
+root `.env` and process environment as ordinary Django commands. Setting the retired
+`EMAIL_HOST_PASSWORD_FILE` variable causes a clear configuration error rather than
+silently reading an old credential. Historical files are not an active configuration source.
+
+## Exposed-credential remediation
+
+P0-1 remains OPEN until the provider password has been rotated and the replacement
+verified. Changing configuration storage does not revoke the old password. Rotate
+through the email provider, enter the replacement privately in root `.env`, and
+verify SMTP authentication without logging credentials. Never send passwords in chat.
+Running processes retain their existing configuration until stopped/restarted.
+Do not restart the current application onto the new crypto format before its
+legacy-envelope migration gate has been addressed. No provider password was rotated,
+no email was sent, and no application process was restarted by this configuration change.
+
+For production, inject EMAIL_HOST_PASSWORD from the deployment secret facility;
+do not bake .env into images or expose it through VITE_* variables. Restrict local
+.env access using OS permissions. Environment variables are configuration delivery,
+not encryption or a substitute for secret rotation.
 
 ## Docker Compose
 

@@ -54,8 +54,22 @@ Low-contrast avatar initials and lost focus after closing dialogs were corrected
 
 ## Mail configuration selected by the user
 
-Private Email supersedes Proton for the current local SMTP profile. The ignored `.runtime/mail.env` points to `mail.privateemail.com:587`, STARTTLS, and `info@kormic.ai` as login/default sender; `.runtime/smtp.password` holds the separately protected password. No password is in this document or tracked configuration. `EMAIL_MODE=prod` is not used; `MAIL_PROVIDER=smtp` selects the adapter. Both API and worker need matching configuration. The normal synthetic profile remains development delivery to avoid sending queued test notifications.
+Private Email uses the root environment configuration with STARTTLS on port 587. `EMAIL_HOST_PASSWORD` is the only supported password source; `EMAIL_HOST_PASSWORD_FILE` is rejected. Use the ignored root `.env` locally or inject the variable through deployment secrets. API and worker need matching configuration. The exposed credential requires provider-side rotation; the local password variable is intentionally blank until the replacement is supplied. See ENVIRONMENT.md for restart and migration constraints.
 
 `python scripts/with_mail.py check` validates Django startup with the local profile without sending. Loading it for a worker can send queued jobs: use a separate reviewed test queue and approved recipients first. `python scripts/with_mail.py runworker` is available for an explicitly intended synthetic SMTP test; it has NOT been started here. The Compose profile has not been switched to live email. Staff-specific From addresses still need provider authorization or a reviewed sender-mapping policy; a single mailbox credential is not authority to impersonate every staff address. Real delivery, bounce handling and provider-limit evidence remain pending.
 
 Browser repeat testing also identified a concurrent-session CSRF token/cookie mismatch. The client now takes the token from the current CSRF cookie for each request, with the response token as fallback; backend CSRF enforcement remains enabled. The browser regression explicitly changes the cookie after session initialization and successfully completes recipient verification.
+
+
+## V2 remediation rollout
+
+Read V2_REMEDIATION.md and KEY_MANAGEMENT.md before deployment. Back up the application and key service under approved custody, inventory legacy unauthenticated envelopes and pre-ledger MFA enrollments, apply Django migrations (0007 adds recipient session creation time), and deploy the key service before the application bulk-read client. Existing workload `unwrap` permission authorizes bounded batch unwraps. No plaintext fallback exists if the service is outdated or sealed.
+
+Configure `--backup-directory` explicitly on the service to independent storage. Initialization alone no longer selects a local backup folder. New root/wrapping/MFA-key changes fail closed without this target. Three managed snapshots are retained; root rotation removes managed older-root snapshots only after new snapshot commit. Check cleanup indicators and reconcile all externally retained copies. Pending files cannot be blindly restored; a crash after commit may leave a pending committed generation requiring investigation.
+
+Run Celery worker and Beat for scheduled transient cleanup. Monitor failed staged deletions, stale reservations, database growth, service bulk-budget denials, snapshot failures and cleanup flags. The bulk certificate budget is 120 batches/minute (maximum 25 unwraps/batch), separate from individual-operation budgets; production capacity and fair sharing still require load tests. Login admission defaults to 50 attempts per source IP and 1,000 globally over a 300-second refill period; account failure buckets refill one attempt per 30 seconds. Correct passwords can reach MFA despite account failure exhaustion, subject to aggregate admission limits. Calibrate shared-NAT capacity before production.
+
+
+## Exact company mailbox exceptions
+
+`COMPANY_EMAIL_ALLOWLIST` is a comma-separated set of exact approved addresses. These addresses are eligible for company account creation, sign-in, session validation, authorized sender assignment and internal-recipient routing. It does not grant a role, bypass MFA or automatically create accounts. The normal organization domain and account permissions still apply. An SMTP profile is required for each sender; credentials remain environment-only. The local Proton configuration uses info@kormic.ai, STARTTLS port 587 and an exact profile. Deploy the same settings and restart the appropriate processes to adopt configuration changes.

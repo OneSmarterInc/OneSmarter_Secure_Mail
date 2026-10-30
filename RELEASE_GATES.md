@@ -71,3 +71,8 @@ See [P1_REMEDIATION.md](P1_REMEDIATION.md) for the authenticated-envelope compat
 ## P2 remediation update (2026-10-29)
 
 See [P2_REMEDIATION.md](P2_REMEDIATION.md) for capability configuration, required idempotency headers, administrator MFA reset, staged quotas, evidence and limitations. P2-10 remains partial: metadata caching does not remove all remote crypto calls from transaction locks. Production approval and trusted legacy-envelope migration remain blocked.
+
+
+## 29 October v2 review follow-up
+
+See [V2_REMEDIATION.md](V2_REMEDIATION.md) for per-finding source status, tests and rollout requirements. Code remediation does not close independent review, provider password rotation, off-host custody, external rollback anchoring or deployment evidence. N-17 remains partial because full audit-history snapshots still hold the key-store lock and post-commit publication crashes need reconciliation. Production remains blocked.

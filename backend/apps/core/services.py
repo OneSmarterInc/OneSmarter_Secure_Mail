@@ -61,7 +61,9 @@ def audit(
     )
 
 
-def rate_limit(request, scope: str, identity: str = "", *, maximum=10, seconds=300):
+def rate_limit(
+    request, scope: str, identity: str = "", *, maximum=10, seconds=300, identity_budget=True
+):
     """Atomic token buckets, using integer credits to avoid floating-point drift."""
     if maximum <= 0 or seconds <= 0:
         raise ValueError("Rate bucket capacity and refill period must be positive")
@@ -69,24 +71,28 @@ def rate_limit(request, scope: str, identity: str = "", *, maximum=10, seconds=3
     identity = identity.strip().lower()
     # Separate people behind one NAT do not consume each other's account allowance.
     # The identity bucket also prevents bypass by rotating source IPs.
-    identities = (
-        [f"identity:{identity}", f"identity-ip:{identity}:{ip}"] if identity else [f"ip:{ip}"]
-    )
+    # Aggregate budgets run first, before allocating attacker-chosen identity rows.
+    buckets = [(f"ip:{ip}", maximum * 5 if identity else maximum)]
+    if scope == "login":
+        buckets.append(("global", 1000))
+    if identity and identity_budget:
+        buckets.extend(
+            [(f"identity:{identity}", maximum), (f"identity-ip:{identity}:{ip}", maximum)]
+        )
     period = seconds * 1_000_000
-    capacity = maximum * period
     now = timezone.now()
     rejected = False
     with transaction.atomic():
-        for value in sorted(identities):
+        for value, allowance in buckets:
+            capacity = allowance * period
             key = keyed(f"token-rate:v1:{scope}:{value}")
-            bucket, _ = RateBucket.objects.get_or_create(
+            bucket, _ = RateBucket.objects.select_for_update().get_or_create(
                 key=key, defaults={"credits": capacity, "refilled_at": now}
             )
-            bucket = RateBucket.objects.select_for_update().get(pk=bucket.pk)
             previous = bucket.refilled_at or now
             delta = max(now - previous, timedelta(0))
             elapsed = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
-            bucket.credits = min(capacity, bucket.credits + elapsed * maximum)
+            bucket.credits = min(capacity, bucket.credits + elapsed * allowance)
             # A backwards wall-clock adjustment must not mint tokens twice.
             bucket.refilled_at = max(previous, now)
             if bucket.credits < period:
@@ -94,6 +100,8 @@ def rate_limit(request, scope: str, identity: str = "", *, maximum=10, seconds=3
             else:
                 bucket.credits -= period
             bucket.save(update_fields=["credits", "refilled_at"])
+            if rejected:
+                break
     if rejected:
         raise Problem("Too many attempts. Please try again later.", "rate_limited", 429)
 

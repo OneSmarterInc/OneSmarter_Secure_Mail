@@ -6,7 +6,8 @@ export const apiBase = recipientPortal ? "/recipient-api" : "/api";
 let csrf = "";
 
 export function useDocumentService() {
-  const [ready, setReady] = useState(false);
+  // Unknown while the first request is pending; this is not a service outage.
+  const [ready, setReady] = useState<boolean | null>(null);
   useEffect(() => {
     let live = true;
     let timer: ReturnType<typeof setTimeout>;

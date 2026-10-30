@@ -130,3 +130,8 @@ See [P2_REMEDIATION.md](P2_REMEDIATION.md) for capability configuration, require
 ## P3 hardening update
 
 See [P3_REMEDIATION.md](P3_REMEDIATION.md) for stable rotation IDs/expected versions, recipient URL cleanup, bounded encrypted-subject search, and deployment verification limits. Rotation retries must reuse the original operation parameters.
+
+
+## 29 October v2 review follow-up
+
+See [V2_REMEDIATION.md](V2_REMEDIATION.md) for per-finding source status, tests and rollout requirements. Code remediation does not close independent review, provider password rotation, off-host custody, external rollback anchoring or deployment evidence. N-17 remains partial because full audit-history snapshots still hold the key-store lock and post-commit publication crashes need reconciliation. Production remains blocked.

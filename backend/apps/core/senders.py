@@ -9,6 +9,8 @@ from django.core.exceptions import ValidationError
 from django.core.mail import get_connection
 from django.core.validators import validate_email
 
+from .company_identity import is_company_address
+
 
 class SenderUnavailable(ValueError):
     pass
@@ -22,7 +24,7 @@ def address(value: str) -> str:
     except ValidationError as exc:
         raise SenderUnavailable("Sender address is invalid") from exc
     value = value.lower()
-    if value.rsplit("@", 1)[-1] != settings.COMPANY_DOMAIN:
+    if not is_company_address(value):
         raise SenderUnavailable("Sender must belong to the company domain")
     return value
 

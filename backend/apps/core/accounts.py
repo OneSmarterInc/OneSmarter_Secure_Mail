@@ -1,6 +1,5 @@
 from datetime import timedelta
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
@@ -8,6 +7,7 @@ from rest_framework import serializers
 from rest_framework.response import Response
 
 from .auth import invite, recent_mfa, validate
+from .company_identity import is_company_address
 from .http import Problem, endpoint, unavailable
 from .models import (
     Attachment,
@@ -34,8 +34,10 @@ class AccountInput(serializers.Serializer):
     )
 
     def validate_email(self, value):
-        if value.rsplit("@", 1)[-1].lower() != settings.COMPANY_DOMAIN:
-            raise serializers.ValidationError("Staff accounts require an @onesmarter.com address.")
+        if not is_company_address(value):
+            raise serializers.ValidationError(
+                "Staff accounts require an approved company email address."
+            )
         return value.lower()
 
 
@@ -185,7 +187,7 @@ def validate_privileges(actor, data):
             403,
         )
     addresses = [email.lower() for email in data.get("sender_addresses", [])]
-    if any(email.split("@")[-1] != actor.organization.domain for email in addresses):
+    if any(not is_company_address(email, actor.organization.domain) for email in addresses):
         raise Problem("Sender addresses must belong to the company domain.")
     return list(dict.fromkeys(addresses))
 
@@ -239,7 +241,7 @@ def accounts(request):
     recent_mfa(request)
     data = validate(AccountInput, request.data)
     email = data["email"].lower()
-    if email.split("@")[-1] != actor.organization.domain:
+    if not is_company_address(email, actor.organization.domain):
         raise Problem("Staff accounts require a company email address.")
     addresses = validate_privileges(actor, data) or [email]
     with transaction.atomic():
@@ -394,6 +396,9 @@ def account_detail(request, ident):
                 raise Problem("A different privileged administrator must reset MFA.", status=403)
             if target.status != "active":
                 raise Problem("MFA reset requires an active account.")
+            # Password possession alone must not win the re-enrollment race.
+            # The verified employee must consume a fresh emailed recovery link.
+            target.set_unusable_password()
             target.mfa_secret = ""
             target.mfa_confirmed = False
             target.mfa_last_tick = -1
@@ -402,6 +407,7 @@ def account_detail(request, ident):
             StaffInvitation.objects.filter(user=target, consumed_at=None).update(
                 consumed_at=timezone.now()
             )
+            invite(target, actor, purpose="password_recovery")
         elif action == "revoke_sessions":
             target.session_version += 1
         elif action == "resend":

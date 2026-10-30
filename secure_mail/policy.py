@@ -26,7 +26,7 @@ def _domain(address: str) -> str:
 
 def decide_delivery(*, authenticated_sender: str, recipients: list[str], subject: str,
                     secure_thread: bool = False, request_secure_information: bool = False,
-                    company_domain: str = 'onesmarter.com') -> DeliveryDecision:
+                    company_domain: str = 'onesmarter.com', company_addresses: tuple[str, ...] = ()) -> DeliveryDecision:
     """Normal mail bypasses portal only; transport/storage encryption is separate.
 
 Invalid inputs fail closed. Nophi is an explicit standalone subject word.
@@ -40,14 +40,16 @@ Secure requests and existing protected threads cannot be downgraded.
         return DeliveryDecision(True, 'missing_recipients')
     try:
         domain = _domain('policy@' + company_domain)
+        approved = {address.lower() for address in company_addresses}
+        for address in approved:
+            _domain(address)
         sender_domain = _domain(authenticated_sender)
-        recipient_domains = [_domain(r) for r in recipients]
+        for recipient in recipients:
+            _domain(recipient)
     except (ValueError, TypeError):
         return DeliveryDecision(True, 'invalid_address')
-    if sender_domain != domain:
+    if sender_domain != domain and authenticated_sender.lower() not in approved:
         return DeliveryDecision(True, 'sender_outside_company')
     if _NOPHI.search(subject):
         return DeliveryDecision(False, 'explicit_nophi_override')
-    if all(d == domain for d in recipient_domains):
-        return DeliveryDecision(False, 'internal_only')
-    return DeliveryDecision(True, 'external_recipient')
+    return DeliveryDecision(True, 'secure_default')

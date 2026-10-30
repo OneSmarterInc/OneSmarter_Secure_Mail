@@ -15,6 +15,7 @@ from rest_framework import serializers
 from rest_framework.response import Response
 
 from . import crypto
+from .company_identity import is_company_address
 from .http import Problem, endpoint
 from .models import Organization, StaffInvitation, StaffUser
 from .operator_access import operator_token_valid
@@ -94,7 +95,7 @@ def setup(request):
     rate_limit(request, "bootstrap", maximum=5)
     data = validate(Credentials, request.data)
     email = data["email"].lower()
-    if not email.endswith("@" + settings.COMPANY_DOMAIN):
+    if not is_company_address(email):
         raise Problem("Use your company email address.")
     validate_password(data["password"])
     with transaction.atomic():
@@ -143,13 +144,12 @@ def pending_user(request):
 def sign_in(request):
     data = validate(Credentials, request.data)
     email = data["email"].lower()
-    rate_limit(request, "login", email, maximum=10)
+    rate_limit(request, "login", email, maximum=10, identity_budget=False)
     user = authenticate(request._request, username=email, password=data["password"])
-    if (
-        user is None
-        or user.status != "active"
-        or user.email.rsplit("@", 1)[-1].lower() != settings.COMPANY_DOMAIN
-    ):
+    if user is None or user.status != "active" or not is_company_address(user.email):
+        # Account failure backoff never prevents a correct password from reaching MFA.
+        # Aggregate IP/global admission above bounds password-hashing CPU first.
+        rate_limit(request, "login-failure", email, maximum=10)
         known = StaffUser.objects.filter(email=email).first()
         if known:
             audit(

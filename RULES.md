@@ -55,6 +55,7 @@ Preserve `secure_mail.decide_delivery` and its tests unless an intentional chang
 - Apply routing to authenticated sender identity and all To/Cc/Bcc envelope recipients. Exact company domain only. The application requires an explicit Nophi toggle and acknowledgement; subject matching remains only in the historical pure-policy module.
 - Secure-information requests and existing protected threads cannot be downgraded through Nophi or internal recipients.
 - Nophi requires an explicit staff permission. The backend implements that check; preserve it and its regression tests. Never rely on hiding a button.
+- Nophi off means protected portal delivery for every recipient, including internal addresses. Only an authorized, acknowledged Nophi override on a new ordinary message permits ordinary email; workers must reject queued deliveries from the retired internal-only route.
 - Blank instructions are valid for secure requests. Recipient responses require text and/or files. Ordinary-message validation must follow the approved product rule.
 - Protected traffic uses generic Proton notifications; confidential content stays in the portal. Normal delivery is not synonymous with plaintext transport.
 - Direct Proton web/mobile sends are outside current enforcement. Do not claim a gateway, mobile interception, or partner API exists.

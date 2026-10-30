@@ -41,6 +41,11 @@ TRUSTED_PROXY_IPS = frozenset(
 # Only for an exclusively Unix-socket-bound backend with restricted socket ownership.
 TRUSTED_PROXY_UNIX_SOCKET = os.environ.get("TRUSTED_PROXY_UNIX_SOCKET", "false") == "true"
 COMPANY_DOMAIN = "onesmarter.com"
+COMPANY_EMAIL_ALLOWLIST = frozenset(
+    value.strip().lower()
+    for value in os.environ.get("COMPANY_EMAIL_ALLOWLIST", "").split(",")
+    if value.strip()
+)
 INSTALLED_APPS = [
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -178,9 +183,11 @@ EMAIL_HOST = os.environ.get("EMAIL_HOST", "mail.privateemail.com")
 EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
-EMAIL_HOST_PASSWORD_FILE = os.environ.get("EMAIL_HOST_PASSWORD_FILE", "")
-if EMAIL_HOST_PASSWORD_FILE:
-    EMAIL_HOST_PASSWORD = Path(EMAIL_HOST_PASSWORD_FILE).read_text(encoding="utf-8").strip()
+if os.environ.get("EMAIL_HOST_PASSWORD_FILE"):
+    raise ImproperlyConfigured(
+        "EMAIL_HOST_PASSWORD_FILE is no longer supported. Configure EMAIL_HOST_PASSWORD "
+        "through the process environment or the private root .env file."
+    )
 EMAIL_USE_TLS = True
 EMAIL_USE_SSL = False
 EMAIL_TIMEOUT = 20
@@ -190,6 +197,7 @@ CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_BEAT_SCHEDULE = {
+    "transient-cleanup": {"task": "securemail.cleanup_transient", "schedule": 900.0},
     "outbox": {"task": "securemail.process_pending", "schedule": 10.0},
     "audit-archive": {"task": "securemail.archive_audit", "schedule": 60.0},
 }

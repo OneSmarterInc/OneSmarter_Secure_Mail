@@ -1,4 +1,4 @@
-"""Load an ignored SMTP profile and run a chosen Django command. Never print credentials."""
+"""Compatibility entry point using the standard environment configuration."""
 
 import os
 import subprocess
@@ -8,26 +8,12 @@ from pathlib import Path
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    allowed = {
-        "MAIL_PROVIDER",
-        "EMAIL_HOST",
-        "EMAIL_PORT",
-        "EMAIL_HOST_USER",
-        "EMAIL_HOST_PASSWORD_FILE",
-        "DEFAULT_FROM_EMAIL",
-    }
-    env = dict(os.environ)
-    for line in (root / ".runtime/mail.env").read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#"):
-            continue
-        key, value = line.split("=", 1)
-        if key not in allowed:
-            raise ValueError("Unexpected SMTP profile setting")
-        env[key] = value
     if len(sys.argv) < 2:
         raise SystemExit("Specify a Django command, for example: check")
+    # Django loads the private root .env; explicit process variables take precedence.
+    # Do not load a second profile or copy passwords into command-line arguments.
     return subprocess.run(
-        [sys.executable, str(root / "manage.py"), *sys.argv[1:]], cwd=root, env=env
+        [sys.executable, str(root / "manage.py"), *sys.argv[1:]], cwd=root, env=dict(os.environ)
     ).returncode
 
 

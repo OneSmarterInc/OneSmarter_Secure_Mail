@@ -79,8 +79,8 @@ All reads, replies, uploads, and downloads require organization and conversation
 1. Reject malformed input, unauthorized senders, invalid recipients, prohibited files, and invalid empty submissions at the API boundary. Never turn validation failure into normal delivery.
 2. Secure-information invitations and existing protected threads remain protected.
 3. For an eligible new ordinary conversation, an explicit Nophi toggle plus acknowledgement chooses normal delivery only for staff explicitly granted that permission (D06). A subject word alone never activates the application override.
-4. Otherwise, all recipients must have the exact domain `onesmarter.com` for normal delivery.
-5. Any external recipient in To, Cc, or Bcc makes the entire remaining message protected.
+4. With Nophi disabled, every new message uses the protected portal, including internal-only recipients and explicitly approved company addresses.
+5. Ordinary email requires the explicit authorized Nophi override and acknowledgement. Internal recipients never bypass the portal automatically. Pending ordinary deliveries from the retired internal-only rule are cancelled and must be composed again under the new policy; existing sent email cannot be recalled.
 
 Evaluate authenticated identity and every envelope recipient, not an untrusted From header. `sub.onesmarter.com` and `onesmarter.com.attacker.example` are external under this baseline.
 
@@ -290,3 +290,15 @@ Real ClamAV is the default for uploads; synthetic scanning requires explicit dev
 ## Portal separation and deployment interface - 2026-10-28
 
 Staff and administrators require exact @onesmarter.com accounts. Recipients may use any valid mailbox. Staff enter through /staff/; invitation links enter through /recipient/ and use a separate API namespace and session cookie. Normal user pages no longer display development banners, test-mailbox controls or engineering release requirements. Operator test tools require explicit opt-in. Local captured notifications are explicitly marked not emailed. This supersedes earlier instructions to show development-mode banners on customer pages; deployment status remains documented and enforced on the server. See [DEPLOYMENT.md](DEPLOYMENT.md) for compatibility, configuration and outstanding release blockers.
+
+
+### Recipient session and transient cleanup clarification (29 October 2026)
+
+Recipient access has a 15-minute idle window and an explicit eight-hour absolute lifetime per verified session. Pointer, keyboard, scrolling and wheel interaction count as activity; polling alone does not. A fresh mailbox code is required after expiry. A retained session identifies only the original recipient for code delivery and grants no content access until successful verification. Revocation, inactive ownership and conversation expiry continue to block access. Staff replies may replace invitation links; an existing session can re-verify without relying on that replaced link. The in-memory reply draft and accepted attachments are retained during this flow.
+
+Celery Beat schedules bounded cleanup every 15 minutes for abandoned, uncommitted uploads older than 24 hours and obsolete rate-limit rows idle for more than two days. Committed messages/documents are excluded; their retention is unchanged. Explicitly cancelled or interrupted uploads may leave a reservation until cleanup completes. Administrator MFA reset invalidates the existing password and requires the employee's one-time emailed recovery link before password setup and MFA re-enrollment.
+
+
+### Approved company mailbox exception (30 October 2026)
+
+The operator-approved exact address info@kormic.ai may be configured in COMPANY_EMAIL_ALLOWLIST and treated as a company mailbox for account eligibility, login, session validation, authorized sender assignment and internal-recipient routing. This exception does not admit other kormic.ai addresses, create an account or automatically assign administrative privileges. Account roles, MFA and sender assignment remain enforced. Proton SMTP is configured locally for notifications from this address with credentials held only in environment configuration.

@@ -141,7 +141,7 @@ export function Auth({
                 ? "Set a strong password. Your next step is MFA verification."
                 : setup
                   ? "Create the first workspace administrator account."
-                  : "Staff and administrators: sign in with your @onesmarter.com account."
+                  : "Staff and administrators: sign in with your approved company account."
               : stage === "enroll"
                 ? "Scan this QR code with your authenticator app, then enter its six-digit code."
                 : stage === "recovery"

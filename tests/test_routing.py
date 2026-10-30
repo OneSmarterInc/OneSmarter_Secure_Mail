@@ -8,8 +8,8 @@ class RoutingTests(unittest.TestCase):
         return decide_delivery(**args)
     def test_external_default_protected(self):
         self.assertTrue(self.route().protected)
-    def test_internal_only_normal(self):
-        self.assertFalse(self.route(recipients=['a@OneSmarter.com','b@onesmarter.com']).protected)
+    def test_internal_only_protected(self):
+        self.assertTrue(self.route(recipients=['a@OneSmarter.com','b@onesmarter.com']).protected)
     def test_mixed_and_lookalike_domains_protected(self):
         for recipient in ['b@example.com','b@onesmarter.com.evil.com','b@sub.onesmarter.com']:
             self.assertTrue(self.route(recipients=['a@onesmarter.com',recipient]).protected)

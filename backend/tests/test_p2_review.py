@@ -141,7 +141,9 @@ def test_recipient_staged_quota(staff_client, settings):
 
 def test_root_rotation_sanitizes_live_sqlite(tmp_path):
     secret = secrets.token_bytes(32)
-    store = KeyStore.initialize(tmp_path / "keys.sqlite3", secret)
+    store = KeyStore.initialize(
+        tmp_path / "keys.sqlite3", secret, backup_directory=tmp_path / "backups"
+    )
     store.unseal(secret, "custodian")
     result = store.rotate_root(secrets.token_bytes(32), store.root_id, "custodian")
     assert result["storage_cleanup_complete"]

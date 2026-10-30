@@ -42,7 +42,12 @@ export function DeliveryRetry({
       {open && (
         <Modal title="Retry this notification?" onClose={() => setOpen(false)}>
           {stepUp ? (
-            <StepUp onDone={() => setStepUp(false)} />
+            <StepUp
+              onDone={() => {
+                setStepUp(false);
+                void retry();
+              }}
+            />
           ) : (
             <>
               <p>

@@ -6,6 +6,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.http import JsonResponse
 from django.utils import timezone
 
+from .company_identity import is_company_address
 from .models import StaffUser
 
 
@@ -45,7 +46,7 @@ class SecurityContextMiddleware:
         if request.user.is_authenticated:
             if (
                 request.user.status != "active"
-                or request.user.email.rsplit("@", 1)[-1].lower() != settings.COMPANY_DOMAIN
+                or not is_company_address(request.user.email)
                 or request.session.get("staff_version") != request.user.session_version
             ):
                 logout(request)

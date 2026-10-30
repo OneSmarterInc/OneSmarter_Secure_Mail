@@ -359,8 +359,8 @@ function CreateAccount({ user, onDone }: { user: User; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [stepUp, setStepUp] = useState(false);
   const submission = useRef({ key: crypto.randomUUID(), signature: "" });
-  async function submit(e: FormEvent) {
-    e.preventDefault();
+  async function submit(e?: FormEvent) {
+    e?.preventDefault();
     setBusy(true);
     setError("");
     const data = {
@@ -385,7 +385,15 @@ function CreateAccount({ user, onDone }: { user: User; onDone: () => void }) {
       setBusy(false);
     }
   }
-  if (stepUp) return <StepUp onDone={() => setStepUp(false)} />;
+  if (stepUp)
+    return (
+      <StepUp
+        onDone={() => {
+          setStepUp(false);
+          void submit();
+        }}
+      />
+    );
   return (
     <form className="stack" onSubmit={submit}>
       <p>
@@ -511,8 +519,8 @@ function AccountDetails({
       : []),
   ];
   const actionKey = useRef({ signature: "", key: crypto.randomUUID() });
-  async function submit(e: FormEvent) {
-    e.preventDefault();
+  async function submit(e?: FormEvent) {
+    e?.preventDefault();
     setBusy(true);
     setError("");
     try {
@@ -546,7 +554,15 @@ function AccountDetails({
       setBusy(false);
     }
   }
-  if (stepUp) return <StepUp onDone={() => setStepUp(false)} />;
+  if (stepUp)
+    return (
+      <StepUp
+        onDone={() => {
+          setStepUp(false);
+          void submit();
+        }}
+      />
+    );
   return (
     <div className="stack">
       <div className="account-identity">
@@ -1073,7 +1089,12 @@ export function AuditLogs({
           }}
         >
           {stepUp ? (
-            <StepUp onDone={() => setStepUp(false)} />
+            <StepUp
+              onDone={() => {
+                setStepUp(false);
+                void exportNow();
+              }}
+            />
           ) : (
             <>
               <p>

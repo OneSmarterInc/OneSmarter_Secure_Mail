@@ -354,7 +354,7 @@ function Application() {
             </a>
             <a href="#/compose" className={path === "/compose" ? "active" : ""}>
               <Icon name="plus" />
-              New message
+              Send message or files
             </a>
             <span className="nav-divider" />
             {user.role === "admin" && (

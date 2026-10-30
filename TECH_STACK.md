@@ -216,7 +216,7 @@ Verification commands and observed results are in README.md and ROADMAP.md. Back
 
 Tradeoffs: a modular monolith limits operational complexity; server-managed keys simplify recipient access but trust the backend; metadata-first search limits leakage but offers less search functionality; outbox/queue workers improve reliability but need operational monitoring.
 
-Current local SMTP selection: Private Email at `mail.privateemail.com:587` with STARTTLS. `EMAIL_HOST_PASSWORD_FILE` supports private file-based credential provisioning; `scripts/with_mail.py` loads the ignored profile for an explicitly chosen command. The normal synthetic worker is unchanged and no live message was sent. See OPERATIONS_RUNBOOK.md.
+Current SMTP selection: Private Email with STARTTLS. Configure EMAIL_HOST_PASSWORD through the private root .env locally or the process environment in deployment. Password-file fallback and legacy profile loading are retired; scripts/with_mail.py delegates to standard Django configuration. Provider-side rotation of the exposed credential remains open. See ENVIRONMENT.md.
 
 ## Antivirus implementation update — 2026-10-28
 

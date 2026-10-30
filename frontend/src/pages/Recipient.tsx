@@ -69,7 +69,7 @@ export function Recipient({ token }: { token: string }) {
     const controller = new AbortController();
     const expire = () => {
       setConversation(null);
-      setStage(token ? "code" : "unavailable");
+      setStage("reverify");
       setError(
         "Your access ended. Verify again if the invitation is still active.",
       );
@@ -86,9 +86,11 @@ export function Recipient({ token }: { token: string }) {
           if (controller.signal.aborted) return;
           setConversation(null);
           setStage(
-            !token || (err instanceof ApiError && err.status === 404)
+            err instanceof ApiError && err.status === 404
               ? "unavailable"
-              : "code",
+              : err instanceof ApiError && err.status === 401
+                ? "reverify"
+                : "read",
           );
           setError((err as Error).message);
           if (err instanceof ApiError && err.status === 404)
@@ -123,10 +125,28 @@ export function Recipient({ token }: { token: string }) {
     };
     window.addEventListener("keydown", active);
     window.addEventListener("pointerdown", active);
+    window.addEventListener("wheel", active, { passive: true });
+    window.addEventListener("scroll", active, { passive: true, capture: true });
     return () => {
       window.removeEventListener("keydown", active);
       window.removeEventListener("pointerdown", active);
+      window.removeEventListener("wheel", active);
+      window.removeEventListener("scroll", active, true);
     };
+  }, [stage, token]);
+  useEffect(() => {
+    if (stage !== "reverify") return;
+    // Send once per transition; preserve the draft throughout verification.
+    setStage("code");
+    setCode("");
+    setBusy(true);
+    void post("/recipient/code", { token })
+      .then(() => {
+        setCooldown(30);
+        setError("");
+      })
+      .catch((err: unknown) => setError((err as Error).message))
+      .finally(() => setBusy(false));
   }, [stage, token]);
   async function requestCode() {
     setBusy(true);
@@ -169,7 +189,9 @@ export function Recipient({ token }: { token: string }) {
     } catch (err) {
       setConversation(null);
       setStage(
-        err instanceof ApiError && err.status === 404 ? "unavailable" : "code",
+        err instanceof ApiError && err.status === 404
+          ? "unavailable"
+          : "reverify",
       );
       if (err instanceof ApiError && err.status === 404)
         setDraft({ body: "", files: [] });

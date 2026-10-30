@@ -56,7 +56,9 @@ def test_custodian_browser(live_service):
 @pytest.fixture
 def vault(tmp_path):
     secret = secrets.token_bytes(32)
-    store = KeyStore.initialize(tmp_path / "vault.sqlite3", secret)
+    store = KeyStore.initialize(
+        tmp_path / "vault.sqlite3", secret, backup_directory=tmp_path / "backups"
+    )
     return store, secret
 
 

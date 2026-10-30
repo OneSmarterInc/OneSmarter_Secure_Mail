@@ -51,9 +51,16 @@ def test_foreign_notification_sender_never_reaches_transport(
 
 @pytest.mark.django_db
 def test_normal_sender_authority_rechecked(staff_client, staff, sender_profile):
+    staff.can_nophi = True
+    staff.save(update_fields=["can_nophi"])
     assert (
         compose(
-            staff_client, mode="ordinary", body="Synthetic test", to=["colleague@onesmarter.com"]
+            staff_client,
+            mode="ordinary",
+            body="Synthetic test",
+            to=["colleague@onesmarter.com"],
+            nophi_override=True,
+            nophi_acknowledged=True,
         ).status_code
         == 201
     )
@@ -67,10 +74,17 @@ def test_normal_sender_authority_rechecked(staff_client, staff, sender_profile):
 
 
 @pytest.mark.django_db
-def test_normal_mail_uses_approved_sender(staff_client, sender_profile):
+def test_normal_mail_uses_approved_sender(staff_client, staff, sender_profile):
+    staff.can_nophi = True
+    staff.save(update_fields=["can_nophi"])
     assert (
         compose(
-            staff_client, mode="ordinary", body="Synthetic test", to=["colleague@onesmarter.com"]
+            staff_client,
+            mode="ordinary",
+            body="Synthetic test",
+            to=["colleague@onesmarter.com"],
+            nophi_override=True,
+            nophi_acknowledged=True,
         ).status_code
         == 201
     )

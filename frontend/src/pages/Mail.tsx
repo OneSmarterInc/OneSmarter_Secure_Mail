@@ -1,6 +1,13 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   api,
+  ApiError,
   apiBase,
   formatDate,
   post,
@@ -34,6 +41,20 @@ export function MailList() {
     "/conversations" + query({ q: debounced, state, page, page_size: size }),
     refresh,
   );
+  const listPanel = useRef<HTMLElement>(null);
+  const [settledHeight, setSettledHeight] = useState(0);
+  useLayoutEffect(() => {
+    if (resource.loading || !listPanel.current) return;
+    // Keep the last completed layout while filters replace rows with a spinner.
+    // Otherwise the document shrinks and the browser clamps the scroll position.
+    const panel = listPanel.current;
+    const measure = () =>
+      setSettledHeight(panel.getBoundingClientRect().height);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, [resource.loading, resource.data, resource.error]);
   const stats = useResource<{
     conversations: number;
     awaiting: number;
@@ -51,7 +72,7 @@ export function MailList() {
           <>
             <a className="button secondary" href="#/compose">
               <Icon name="plus" size={18} />
-              New message
+              Send message or files
             </a>
             <a className="button primary" href="#/request">
               <Icon name="shield" size={18} />
@@ -83,7 +104,12 @@ export function MailList() {
           relevant conversation to review.
         </div>
       )}
-      <section className="card flush">
+      <section
+        className="card flush"
+        ref={listPanel}
+        aria-busy={resource.loading}
+        style={resource.loading ? { minHeight: settledHeight } : undefined}
+      >
         <div className="list-toolbar">
           <div className="segmented">
             <button
@@ -138,6 +164,12 @@ export function MailList() {
         <ErrorNotice message={resource.error} />
         {resource.loading ? (
           <Loading />
+        ) : resource.error ? (
+          <div className="notice warning">
+            Conversations could not be loaded. This does not mean your inbox is
+            empty. Your saved conversations have not been deleted. Contact your
+            administrator if refreshing does not resolve the problem.
+          </div>
         ) : resource.data?.results.length ? (
           <div className="conversation-list">
             {resource.data.results.map((c) => (
@@ -202,7 +234,7 @@ export function MailList() {
               : "Send a message or request documents. Your protected exchanges will appear here."}
           </Empty>
         )}
-        {resource.data && (
+        {!resource.error && resource.data && (
           <Pagination
             count={resource.data.count}
             page={page}
@@ -332,6 +364,7 @@ export function Compose({
   const [nophi, setNophi] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
   const [routeSignature, setRouteSignature] = useState("");
+  const [routeRevision, setRouteRevision] = useState(0);
   const [expiry, setExpiry] = useState(7);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -389,11 +422,15 @@ export function Compose({
         }
       });
     return () => controller.abort();
-  }, [debounced, requestMode, to.length]);
+  }, [debounced, requestMode, to.length, routeRevision]);
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!serviceReady) {
-      setError("Service is disabled.");
+      setError(
+        serviceReady === null
+          ? "Checking service availability. Please wait."
+          : "Service is disabled.",
+      );
       return;
     }
     if (!routeFresh || (nophi && !acknowledged)) {
@@ -412,6 +449,12 @@ export function Compose({
       );
       window.location.hash = "/messages/" + result.id;
     } catch (err) {
+      if (err instanceof ApiError && err.code === "route_changed") {
+        setRouteSignature("");
+        setRoute(null);
+        setRouteRevision((value) => value + 1);
+        submission.current = { signature: "", key: crypto.randomUUID() };
+      }
       setError((err as Error).message);
     } finally {
       setBusy(false);
@@ -421,7 +464,9 @@ export function Compose({
     <>
       <PageHeader
         eyebrow="START A CONVERSATION"
-        title={requestMode ? "Request secure information" : "New message"}
+        title={
+          requestMode ? "Request secure information" : "Send message or files"
+        }
         description={
           requestMode
             ? "Give your recipient a private place to send the documents you need."
@@ -521,7 +566,7 @@ export function Compose({
               }
             />
           </label>
-          {!serviceReady && (
+          {serviceReady === false && (
             <div className="notice warning" role="status">
               Service is disabled.
             </div>
@@ -590,9 +635,7 @@ export function Compose({
               <small>
                 {route?.reason === "explicit_nophi_override"
                   ? "Nophi override — the actual content will be emailed."
-                  : route?.reason === "internal_only"
-                    ? "All recipients are internal."
-                    : "Content stays in the portal; notifications contain a link."}
+                  : "Content stays in the portal for all recipients; notifications contain a link."}
               </small>
             </div>
             <ErrorNotice message={routeError} />
@@ -707,7 +750,11 @@ export function ReplyForm({
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!serviceReady) {
-      setError("Service is disabled.");
+      setError(
+        serviceReady === null
+          ? "Checking service availability. Please wait."
+          : "Service is disabled.",
+      );
       return;
     }
     setBusy(true);
@@ -731,6 +778,7 @@ export function ReplyForm({
       );
       setBody("");
       setFiles([]);
+      submission.current = { signature: "", key: crypto.randomUUID() };
       setSuccess("Reply saved. Notification queued.");
       onSent();
     } catch (err) {
@@ -786,7 +834,7 @@ export function ReplyForm({
           placeholder="Write your response…"
         />
       </label>
-      {!serviceReady && (
+      {serviceReady === false && (
         <div className="notice warning" role="status">
           Service is disabled.
         </div>
@@ -797,7 +845,10 @@ export function ReplyForm({
       >
         <Uploads
           files={files}
-          onChange={setFiles}
+          onChange={(next) => {
+            setFiles(next);
+            onDraftChange?.({ body, files: next });
+          }}
           recipient={recipientMode}
           onBusy={setUploading}
         />

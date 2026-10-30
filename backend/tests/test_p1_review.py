@@ -57,7 +57,9 @@ def test_public_keys_cannot_forge_mfa_or_document(org):
 
 def test_rotation_backup_restores_new_key_and_failure_rolls_back(tmp_path, monkeypatch):
     secret = secrets.token_bytes(32)
-    store = KeyStore.initialize(tmp_path / "live.sqlite3", secret)
+    store = KeyStore.initialize(
+        tmp_path / "live.sqlite3", secret, backup_directory=tmp_path / "backups"
+    )
     store.unseal(secret, "custodian")
     org = str(uuid.uuid4())
     context = f"secure-mail:v1:organization={org}:file=test"

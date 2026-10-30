@@ -48,7 +48,9 @@ def test_service_mode_rejects_local_legacy_reads(settings, monkeypatch):
 
 def test_seal_applies_to_every_instance_of_store(tmp_path):
     secret = secrets.token_bytes(32)
-    first = KeyStore.initialize(tmp_path / "keys.sqlite3", secret)
+    first = KeyStore.initialize(
+        tmp_path / "keys.sqlite3", secret, backup_directory=tmp_path / "backups"
+    )
     first.unseal(secret, "custodian")
     org = str(uuid.uuid4())
     key = first.rotate(org, None, str(uuid.uuid4()), "maintenance")
@@ -68,7 +70,9 @@ def test_seal_applies_to_every_instance_of_store(tmp_path):
 
 def test_rotation_history_fits_versions_response(tmp_path):
     secret = secrets.token_bytes(32)
-    store = KeyStore.initialize(tmp_path / "keys.sqlite3", secret)
+    store = KeyStore.initialize(
+        tmp_path / "keys.sqlite3", secret, backup_directory=tmp_path / "backups"
+    )
     store.unseal(secret, "custodian")
     org = str(uuid.uuid4())
     active = None
@@ -98,7 +102,9 @@ def test_rotation_history_fits_versions_response(tmp_path):
 
 def test_unseal_detects_modified_audit_history(tmp_path):
     secret = secrets.token_bytes(32)
-    store = KeyStore.initialize(tmp_path / "keys.sqlite3", secret)
+    store = KeyStore.initialize(
+        tmp_path / "keys.sqlite3", secret, backup_directory=tmp_path / "backups"
+    )
     store.unseal(secret, "custodian")
     store.seal("custodian")
     # Model a modified backup / privileged filesystem writer, not a portal user.
@@ -142,7 +148,9 @@ def test_service_ownership_across_processes_and_crash(tmp_path):
 
 @pytest.mark.parametrize("active,after", [(1, ""), (True, str(uuid.uuid4())), (False, "bad")])
 def test_version_query_rejects_invalid_parameters(tmp_path, active, after):
-    store = KeyStore.initialize(tmp_path / "keys.sqlite3", secrets.token_bytes(32))
+    store = KeyStore.initialize(
+        tmp_path / "keys.sqlite3", secrets.token_bytes(32), backup_directory=tmp_path / "backups"
+    )
     with pytest.raises(ValueError):
         store.list_versions(str(uuid.uuid4()), active=active, after=after)
 
@@ -150,7 +158,9 @@ def test_version_query_rejects_invalid_parameters(tmp_path, active, after):
 @pytest.mark.parametrize("damage", ["link", "gap", "json"])
 def test_audit_corruption_clears_an_already_unsealed_root(tmp_path, damage):
     secret = secrets.token_bytes(32)
-    store = KeyStore.initialize(tmp_path / "keys.sqlite3", secret)
+    store = KeyStore.initialize(
+        tmp_path / "keys.sqlite3", secret, backup_directory=tmp_path / "backups"
+    )
     store.unseal(secret, "custodian")
     store.record_event("worker", "test_event")
     store.record_event("worker", "test_event")

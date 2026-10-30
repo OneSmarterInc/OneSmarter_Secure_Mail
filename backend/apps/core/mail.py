@@ -94,8 +94,20 @@ def process_job(job_id):
         if (
             job.conversation
             and not job.conversation.protected
+            and (
+                job.conversation.routing_reason != "explicit_nophi_override"
+                or job.conversation.mode != "ordinary"
+            )
+        ):
+            job.state = "cancelled"
+            job.error_code = "route_policy_changed"
+            job.save()
+            return
+        if (
+            job.conversation
+            and not job.conversation.protected
             and job.conversation.routing_reason == "explicit_nophi_override"
-            and not job.actor.can_nophi
+            and (not job.actor or not job.actor.can_nophi)
         ):
             job.state = "cancelled"
             job.error_code = "permission_revoked"
@@ -125,6 +137,8 @@ def process_job(job_id):
                 raise senders.SenderUnavailable("Sender authority was withdrawn")
             smtp_connection = senders.connection(sender)
             text = data["body"] + ("\n\n" + data["link"] if data.get("link") else "")
+            if job.conversation and job.conversation.protected:
+                text += "\n\nDo not reply. Please respond through the secure portal."
             message = EmailMultiAlternatives(
                 subject=data["subject"],
                 body=text,
@@ -169,6 +183,8 @@ def process_job(job_id):
         state, error = "failed", "sender_not_configured"
     except smtplib.SMTPAuthenticationError:
         state, error = "failed", "mail_authentication_failed"
+    except smtplib.SMTPRecipientsRefused:
+        state, error = "failed", "mail_recipients_refused"
     except (OSError, smtplib.SMTPException):
         # A disconnect can follow acceptance. Do not blindly retry an ambiguous SMTP send.
         if submission_started:

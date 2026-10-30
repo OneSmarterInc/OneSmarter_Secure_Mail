@@ -60,7 +60,7 @@ def test_bucket_refill_cap_and_clock_rollback(monkeypatch):
         rate_limit(req, "login", "a@example.test")
     with pytest.raises(Problem):
         rate_limit(req, "login", "a@example.test")
-    assert RateBucket.objects.count() == 2
+    assert RateBucket.objects.count() == 4
 
 
 @pytest.mark.django_db
@@ -95,3 +95,16 @@ def test_login_api_other_account_survives(settings, client, monkeypatch):
         assert login("a@onesmarter.com").status_code == 401
     assert login("a@onesmarter.com").status_code == 429
     assert login("b@onesmarter.com").status_code == 401
+
+
+@pytest.mark.django_db
+def test_password_spray_stops_before_identity_allocation(monkeypatch):
+    now = timezone.now()
+    monkeypatch.setattr("backend.apps.core.services.timezone.now", lambda: now)
+    for index in range(50):
+        rate_limit(request(), "login", f"user{index}@example.test")
+    count = RateBucket.objects.count()
+    for index in range(50, 200):
+        with pytest.raises(Problem):
+            rate_limit(request(), "login", f"user{index}@example.test")
+    assert RateBucket.objects.count() == count

@@ -33,7 +33,7 @@ def test_remote_rotation_lost_response_reuses_original_operation(
     org, settings, tmp_path, monkeypatch
 ):
     secret = secrets.token_bytes(32)
-    store = KeyStore.initialize(tmp_path / "live.db", secret)
+    store = KeyStore.initialize(tmp_path / "live.db", secret, backup_directory=tmp_path / "backups")
     store.unseal(secret, "custodian")
     operation = str(uuid.uuid4())
     lost = True

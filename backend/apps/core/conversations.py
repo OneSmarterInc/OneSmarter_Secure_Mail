@@ -14,6 +14,7 @@ from secure_mail import decide_delivery
 
 from . import crypto, document_service, storage
 from .auth import validate
+from .company_identity import is_company_address
 from .http import Problem, endpoint, unavailable
 from .models import (
     Attachment,
@@ -118,6 +119,7 @@ def recipient(request):
         .filter(
             pk=request.session.get("recipient_session"),
             revoked_at=None,
+            created_at__gt=timezone.now() - timedelta(hours=8),
             expires_at__gt=timezone.now(),
         )
         .first()
@@ -149,10 +151,12 @@ def attachment_data(attachment):
     }
 
 
-def summary(conversation):
+def summary(conversation, subject=None):
     return {
         "id": str(conversation.pk),
-        "subject": crypto.decrypt(
+        "subject": subject
+        if subject is not None
+        else crypto.decrypt(
             conversation.subject_ciphertext, subject_context(conversation)
         ).decode(),
         "mode": conversation.mode,
@@ -223,12 +227,18 @@ def detail(conversation, grant=None):
 
 def policy(user, data):
     sender = data["sender"].lower()
-    if sender not in user.sender_addresses or sender.split("@")[-1] != user.organization.domain:
+    if sender not in user.sender_addresses or not is_company_address(
+        sender, user.organization.domain
+    ):
         raise Problem("This sender address is not authorized.", "sender_denied", 403)
     if data["nophi_override"] and data["mode"] != "ordinary":
         raise Problem("Secure requests cannot use Nophi.", "nophi_not_allowed")
     decision = decide_delivery(
         authenticated_sender=sender,
+        company_domain=user.organization.domain,
+        company_addresses=settings.COMPANY_EMAIL_ALLOWLIST
+        if user.organization.domain == settings.COMPANY_DOMAIN
+        else (),
         recipients=data["to"] + data["cc"] + data["bcc"],
         subject="Nophi" if data["nophi_override"] else "",
         request_secure_information=data["mode"] == "secure_request",
@@ -300,6 +310,7 @@ def conversations(request):
         search = request.query_params.get("q", "")[:200].strip()
         if request.query_params.get("state"):
             query = query.filter(state=request.query_params["state"])
+        subjects = {}
         if search:
             rate_limit(request, "conversation_search", str(user.pk), maximum=10, seconds=60)
             # No plaintext subject index or search-term persistence. Fail explicitly
@@ -313,10 +324,12 @@ def conversations(request):
                 )
             needle = search.casefold()
             matches = []
-            for conversation in candidates:
-                subject = crypto.decrypt(
-                    conversation.subject_ciphertext, subject_context(conversation)
-                ).decode()
+            decrypted = crypto.decrypt_many(
+                [(c.subject_ciphertext, subject_context(c)) for c in candidates]
+            )
+            for conversation, value in zip(candidates, decrypted, strict=True):
+                subject = value.decode()
+                subjects[conversation.pk] = subject
                 if (
                     needle in subject.casefold()
                     or needle in conversation.state.casefold()
@@ -330,14 +343,29 @@ def conversations(request):
             ordering={"created_at": "created_at", "updated_at": "updated_at", "state": "state"},
             default="-updated_at",
         )
-        return Response({"results": [summary(c) for c in items], **meta})
+        items = list(items)
+        if not search:
+            subjects = {
+                c.pk: value.decode()
+                for c, value in zip(
+                    items,
+                    crypto.decrypt_many(
+                        [(c.subject_ciphertext, subject_context(c)) for c in items]
+                    ),
+                    strict=True,
+                )
+            }
+        return Response({"results": [summary(c, subjects[c.pk]) for c in items], **meta})
     document_service.require_ready()
     data = validate(Compose, request.data)
-    decision = policy(user, data)
-
     with transaction.atomic():
         lock_organization(user.organization_id)
         user = current_staff(request)
+        existing, record = idempotency(
+            request, user.organization, f"staff:{user.pk}", "compose", data
+        )
+        if existing:
+            return Response({"id": str(existing.resource_id)}, status=200)
         decision = policy(user, data)
         expected = data.get("expected_route")
         if data["mode"] == "ordinary" and expected != {
@@ -351,11 +379,6 @@ def conversations(request):
                 "nophi_acknowledgement_required",
             )
 
-        existing, record = idempotency(
-            request, user.organization, f"staff:{user.pk}", "compose", data
-        )
-        if existing:
-            return Response({"id": str(existing.resource_id)}, status=200)
         conversation = Conversation(
             organization=user.organization,
             owner=user,
@@ -363,6 +386,7 @@ def conversations(request):
             mode=data["mode"],
             protected=decision.protected,
             routing_reason=decision.reason,
+            policy_version="2026-10-30-secure-default",
             expires_at=timezone.now() + timedelta(days=data["expiry_days"]),
         )
         conversation.subject_ciphertext = crypto.encrypt(
@@ -577,7 +601,7 @@ def staff_reply(request, ident):
 
 
 class InvitationToken(serializers.Serializer):
-    token = serializers.CharField(max_length=200)
+    token = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
     code = serializers.RegexField(r"^\d{6}$", required=False)
 
 
@@ -604,15 +628,30 @@ def landing(request):
     )
 
 
+def verification_grant(request, token):
+    # An idle session is only a routing hint for a new email challenge. It never
+    # authorizes reading content. Revocation and conversation expiry still apply.
+    session = (
+        RecipientSession.objects.select_related(
+            "grant__conversation__organization", "grant__conversation__owner"
+        )
+        .filter(pk=request.session.get("recipient_session"), revoked_at=None)
+        .first()
+    )
+    if session:
+        return active_grant(session.grant)
+    return token_grant(token)
+
+
 @endpoint(["POST"])
 def issue_code(request):
     data = validate(InvitationToken, request.data)
-    grant = token_grant(data["token"])
+    grant = verification_grant(request, data["token"])
     rate_limit(request, "code-hour", grant.email, maximum=10, seconds=3600)
     rate_limit(request, "code-day", grant.email, maximum=30, seconds=86400)
     with transaction.atomic():
         lock_organization(grant.conversation.organization_id)
-        grant = token_grant(data["token"])
+        grant = verification_grant(request, data["token"])
         RecipientGrant.objects.select_for_update().get(pk=grant.pk)
         latest = OTPChallenge.objects.filter(grant=grant).order_by("-created_at").first()
         if latest and (timezone.now() - latest.created_at).total_seconds() < 30:
@@ -648,12 +687,12 @@ def issue_code(request):
 @endpoint(["POST"])
 def verify_code(request):
     data = validate(InvitationToken, request.data)
-    grant = token_grant(data["token"])
+    grant = verification_grant(request, data["token"])
     rate_limit(request, "code-attempt", grant.email, maximum=20, seconds=3600)
     accepted = False
     with transaction.atomic():
         lock_organization(grant.conversation.organization_id)
-        grant = token_grant(data["token"])
+        grant = verification_grant(request, data["token"])
         RecipientGrant.objects.select_for_update().get(pk=grant.pk)
         challenge = (
             OTPChallenge.objects.select_for_update()

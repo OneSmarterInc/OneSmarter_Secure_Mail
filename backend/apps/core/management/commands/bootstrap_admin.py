@@ -5,6 +5,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from backend.apps.core.company_identity import is_company_address
 from backend.apps.core.models import Organization, StaffUser
 from backend.apps.core.services import audit
 
@@ -19,7 +20,7 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, *args, **options):
         email = options["email"].strip().lower()
-        if not email.endswith("@" + settings.COMPANY_DOMAIN):
+        if not is_company_address(email):
             raise CommandError("A company email address is required.")
         org, _ = Organization.objects.get_or_create(
             domain=settings.COMPANY_DOMAIN, defaults={"name": "OneSmarter"}

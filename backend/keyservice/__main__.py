@@ -53,6 +53,13 @@ def main():
     serve.add_argument("--allow-http-loopback-origin", action="store_true")
     args = parser.parse_args()
     if args.command == "init":
+        if args.allow_local_recovery_synthetic and not (
+            os.environ.get("SYNTHETIC_MODE", "").lower() == "true"
+            and os.environ.get("APP_ENV", "") in {"development", "test"}
+        ):
+            parser.error(
+                "Local recovery requires SYNTHETIC_MODE=true and APP_ENV=development or test"
+            )
         store = args.store.resolve()
         if store.exists():
             parser.error("Refusing to overwrite a store")

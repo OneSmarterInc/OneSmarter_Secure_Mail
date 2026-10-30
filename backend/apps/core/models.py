@@ -128,6 +128,7 @@ class OTPChallenge(models.Model):
 
 
 class RecipientSession(models.Model):
+    created_at = models.DateTimeField(default=timezone.now)
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     grant = models.ForeignKey(RecipientGrant, on_delete=models.PROTECT)
     expires_at = models.DateTimeField()
@@ -237,7 +238,7 @@ class AuditExport(models.Model):
 class RateBucket(models.Model):
     key = models.CharField(max_length=100, primary_key=True)
     credits = models.BigIntegerField(default=0)
-    refilled_at = models.DateTimeField(null=True)
+    refilled_at = models.DateTimeField(null=True, db_index=True)
 
 
 class WrappingKeyVersion(models.Model):

@@ -150,6 +150,40 @@ def decrypt(value: str, context: str) -> bytes:
         raise CryptoUnavailable("Protected content could not be verified.") from exc
 
 
+def decrypt_many(values: list[tuple[str, str]]) -> list[bytes]:
+    """Request-local bulk decryption; no plaintext or DEK survives this request."""
+    if settings.KEY_PROTECTOR != "key-service":
+        return [decrypt(value, context) for value, context in values]
+    results = []
+    try:
+        for offset in range(0, len(values), 25):
+            batch = values[offset : offset + 25]
+            orgs = {str(organization(context)) for _, context in batch}
+            if len(orgs) != 1:
+                raise ValueError("Batch must have a single organization")
+            envelopes = [protocol.parse_object(value) for value, _ in batch]
+            items = []
+            for envelope, (_, context) in zip(envelopes, batch, strict=True):
+                if set(envelope) != protocol.WRAPPER | {"nonce", "data"}:
+                    raise ValueError("Unsupported envelope")
+                wrapper = {field: envelope[field] for field in protocol.WRAPPER}
+                protocol.validate(wrapper)
+                items.append({"context": context, "wrapper": wrapper})
+            response = keyring.service().call("unwrap-batch", organization=orgs.pop(), items=items)
+            deks = response["deks"]
+            if not isinstance(deks, list) or len(deks) != len(batch):
+                raise ValueError("Invalid batch response")
+            for envelope, (_, context), dek in zip(envelopes, batch, deks, strict=True):
+                results.append(
+                    AESGCM(protocol.decode(dek, 32)).decrypt(
+                        unb64(envelope["nonce"]), unb64(envelope["data"]), context.encode()
+                    )
+                )
+        return results
+    except ERRORS as exc:
+        raise CryptoUnavailable("Protected content could not be verified.") from exc
+
+
 def rewrap(value: str, context: str) -> str:
     """Replace the wrapped data key while preserving file ciphertext, nonce and key."""
     try:
