@@ -19,7 +19,17 @@ from .company_identity import is_company_address
 from .http import Problem, endpoint
 from .models import Organization, StaffInvitation, StaffUser
 from .operator_access import operator_token_valid
-from .services import audit, current_staff, digest, keyed, lock_organization, queue_mail, rate_limit
+from .services import (
+    audit,
+    current_staff,
+    digest,
+    keyed,
+    lock_organization,
+    login_rate_limit,
+    queue_mail,
+    rate_limit,
+    record_login_failure,
+)
 
 
 def user_data(user):
@@ -72,6 +82,7 @@ def session(request):
             "synthetic_mode": settings.SYNTHETIC_MODE,
             "dev_tools": settings.ENABLE_DEV_TOOLS,
             "setup_required": settings.SYNTHETIC_MODE and not StaffUser.objects.exists(),
+            **(session_deadlines(request) if verified else {}),
         }
     )
 
@@ -147,10 +158,11 @@ def pending_user(request):
 def sign_in(request):
     data = validate(Credentials, request.data)
     email = data["email"].lower()
-    rate_limit(request, "login", email, maximum=10, seconds=60)
+    login_rate_limit(request, email)
     user = authenticate(request._request, username=email, password=data["password"])
     if user is None or user.status != "active" or not is_company_address(user.email):
         known = StaffUser.objects.filter(email=email).first()
+        wait = record_login_failure(known) if known else 0
         if known:
             audit(
                 known.organization,
@@ -160,11 +172,14 @@ def sign_in(request):
                 known.pk,
                 outcome="failure",
             )
-        raise Problem(
+        problem = Problem(
             "Email or password is incorrect, or the account is unavailable.",
             "invalid_credentials",
             401,
         )
+        if wait:
+            problem.wait = wait
+        raise problem
     begin_auth(request, user)
     return Response({"enrollment_required": not user.mfa_confirmed})
 
@@ -240,6 +255,9 @@ def verify_mfa(request):
     login(request._request, user, backend="django.contrib.auth.backends.ModelBackend")
     request.session["staff_version"] = user.session_version
     request.session["mfa_at"] = time.time()
+    request.session["staff_started_at"] = time.time()
+    request.session["staff_last_seen"] = time.time()
+    request.session.set_expiry(settings.STAFF_ABSOLUTE_SECONDS)
     return Response(
         {"user": user_data(user), "csrf": get_token(request._request), "recovery_codes": codes}
     )
@@ -358,3 +376,17 @@ def invite(user, actor, purpose="activate"):
         user.pk,
         metadata={"purpose": purpose},
     )
+
+
+def session_deadlines(request):
+    return {
+        "idle_expires_at": request.session.get("staff_last_seen", 0) + settings.STAFF_IDLE_SECONDS,
+        "absolute_expires_at": request.session.get("staff_started_at", 0)
+        + settings.STAFF_ABSOLUTE_SECONDS,
+    }
+
+
+@endpoint(["POST"], staff=True)
+def activity(request):
+    request.session["staff_last_seen"] = time.time()
+    return Response(session_deadlines(request))

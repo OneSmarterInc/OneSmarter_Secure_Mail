@@ -182,3 +182,48 @@ def paginate(query, request, *, ordering: dict, default: str):
         "page": page,
         "page_size": size,
     }
+
+
+def login_rate_limit(request, email: str):
+    """Strict source cap; ten attempts per account/source network per minute."""
+    import ipaddress
+
+    address = ipaddress.ip_address(client_ip(request))
+    prefix = ipaddress.ip_network(f"{address}/{24 if address.version == 4 else 64}", strict=False)
+    rate_limit(request, "login-source", maximum=50, seconds=60)
+    rate_limit(request, "login-account-network", f"{email}:{prefix}", maximum=10, seconds=60)
+
+
+def record_login_failure(user):
+    """Aggregate failure telemetry never blocks a correct password from a fresh source.
+
+    Backoff is communicated without sleeping workers. Source buckets enforce the
+    hard limit; distributed hashing abuse additionally needs edge controls.
+    """
+    from .models import LoginFailureState
+
+    now = timezone.now()
+    with transaction.atomic():
+        state, _ = LoginFailureState.objects.select_for_update().get_or_create(user=user)
+        if (now - state.window_started).total_seconds() >= 600:
+            state.failures = 0
+            state.window_started = now
+        state.failures += 1
+        state.save()
+        count = state.failures
+    if count >= 100 and count % 100 == 0:
+        import logging
+
+        logging.getLogger("securemail.auth").warning(
+            "sustained_login_failures account_id=%s count=%s", user.pk, count
+        )
+        audit(
+            user.organization,
+            None,
+            "auth.sustained_failures",
+            "account",
+            user.pk,
+            outcome="failure",
+            metadata={"failures": count, "window_seconds": 600},
+        )
+    return min(300, 2 ** min(9, (count - 100) // 10)) if count >= 100 else 0

@@ -185,6 +185,65 @@ function Application() {
   const [sessionRetry, setSessionRetry] = useState(0);
   const [sessionChecking, setSessionChecking] = useState(false);
   const sessionEpoch = useRef(0);
+  const [idleWarning, setIdleWarning] = useState(false);
+  const deadline = useRef(0);
+  useEffect(() => {
+    deadline.current = Math.min(
+      session?.idle_expires_at ?? Infinity,
+      session?.absolute_expires_at ?? Infinity,
+    );
+  }, [session]);
+  useEffect(() => {
+    if (recipientPortal || !session?.user) return;
+    let active = true;
+    let pending = false;
+    let dirty = false;
+    let lastSent = 0;
+    const epoch = sessionEpoch.current;
+    const activity = (event: Event) => {
+      if (event.isTrusted) dirty = true;
+    };
+    async function tick() {
+      const now = Date.now() / 1000;
+      if (now >= deadline.current) {
+        window.dispatchEvent(new Event("session-expired"));
+        return;
+      }
+      setIdleWarning(deadline.current - now <= 60);
+      if (
+        !dirty ||
+        pending ||
+        now - lastSent < 30 ||
+        document.visibilityState !== "visible"
+      )
+        return;
+      pending = true;
+      dirty = false;
+      lastSent = now;
+      try {
+        const times = await post<{
+          idle_expires_at: number;
+          absolute_expires_at: number;
+        }>("/auth/activity");
+        if (active && epoch === sessionEpoch.current)
+          setSession((s) => (s?.user ? { ...s, ...times } : s));
+      } catch {
+        /* The confirmed deadline still locks the screen during an outage. */
+      } finally {
+        pending = false;
+      }
+    }
+    const events = ["pointerdown", "keydown", "wheel", "touchstart"];
+    events.forEach((name) =>
+      window.addEventListener(name, activity, { passive: true }),
+    );
+    const timer = window.setInterval(() => void tick(), 1000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+      events.forEach((name) => window.removeEventListener(name, activity));
+    };
+  }, [session?.user?.id]);
   useEffect(() => {
     if (!recipientPortal && route.startsWith("/invite/")) {
       window.location.replace(`/recipient/${window.location.hash}`);
@@ -501,6 +560,12 @@ function Application() {
                     ? "Checking session…"
                     : "Retry session check"}
                 </button>
+              </div>
+            )}
+            {idleWarning && (
+              <div className="notice warning" role="status">
+                Your session will lock soon due to inactivity. Interact with
+                this page to stay signed in.
               </div>
             )}
             {page}

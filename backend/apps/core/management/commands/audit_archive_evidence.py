@@ -42,8 +42,17 @@ class Command(BaseCommand):
                         "version_id": a.version_id,
                         "digest": a.digest,
                         "retain_until": a.retain_until.isoformat(),
+                        **(
+                            {
+                                "batch_id": str(a.batch_id),
+                                "batch_sequence": a.batch.sequence,
+                                "previous_digest": a.batch.previous_digest,
+                            }
+                            if a.batch_id
+                            else {}
+                        ),
                     }
-                    for a in AuditArchive.objects.select_related("event").order_by(
+                    for a in AuditArchive.objects.select_related("event", "batch").order_by(
                         "event__sequence"
                     )
                 ]

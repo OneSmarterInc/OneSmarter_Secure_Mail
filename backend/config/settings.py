@@ -202,7 +202,7 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_BEAT_SCHEDULE = {
     "transient-cleanup": {"task": "securemail.cleanup_transient", "schedule": 900.0},
     "outbox": {"task": "securemail.process_pending", "schedule": 10.0, "options": {"expires": 10}},
-    "audit-archive": {"task": "securemail.archive_audit", "schedule": 60.0},
+    "audit-archive": {"task": "securemail.archive_audit", "schedule": 10.0},
 }
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
@@ -228,3 +228,11 @@ EVIDENCE_OPENSSL = os.environ.get("EVIDENCE_OPENSSL", "openssl")
 
 # Dedicated stable secret in deployment; changing it requires rebuilding the word index.
 SEARCH_INDEX_KEY = os.environ.get("SEARCH_INDEX_KEY", SECRET_KEY if SYNTHETIC_MODE else "")
+
+AUDIT_ARCHIVE_BATCH_SIZE = min(
+    1000, max(1, int(os.environ.get("AUDIT_ARCHIVE_BATCH_SIZE", "1000")))
+)
+AUDIT_ARCHIVE_MAX_BATCHES = max(1, int(os.environ.get("AUDIT_ARCHIVE_MAX_BATCHES", "20")))
+AUDIT_ARCHIVE_MAX_LAG_SECONDS = int(os.environ.get("AUDIT_ARCHIVE_MAX_LAG_SECONDS", "900"))
+STAFF_IDLE_SECONDS = max(60, int(os.environ.get("STAFF_IDLE_SECONDS", "900")))
+STAFF_ABSOLUTE_SECONDS = 8 * 60 * 60

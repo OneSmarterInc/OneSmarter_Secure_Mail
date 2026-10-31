@@ -4,7 +4,7 @@ Updated 2026-10-28. Implemented and locally tested candidate; **production remai
 
 ## Profile and runtime
 
-The specific browser, key-service, remote scanner and recovery-transfer candidate links listed below use TLS 1.3 with **only X25519MLKEM768**, hostname/CA verification and, for internal services, dedicated client certificates. The shared Python adapter checks the actually negotiated group before sending application data. Session resumption is rejected; session tickets are disabled. Classical-only negotiation fails, rather than being an allowed fallback.
+The controlled staff-content, key-service, remote scanner and recovery-transfer candidate links listed below require TLS 1.3 with **X25519MLKEM768**, hostname/CA verification and, for internal services, dedicated client certificates. The shared Python adapter checks the actually negotiated group before sending application data. Session resumption is rejected; session tickets are disabled. Classical-only negotiation fails on internal hops. The public recipient edge prefers hybrid but accepts X25519 (QA-07); that fallback is not PQ protected. Staff classical connections receive only an upgrade notice, never protected content.
 
 This profile uses the public Python 3.15 `SSLContext.set_groups()` and `SSLSocket.group()` APIs with hybrid-capable OpenSSL (3.5 or later). The existing Python 3.12/OpenSSL 3.0 development runtime cannot meet this requirement. Strict mode refuses it. The ignored portable Python used for local verification is a test tool, not a deployed runtime. Candidate container definition: `deploy/Dockerfile.pq`; build, pin/attest its resulting image, and verify compatibility on the target Linux host before release.
 
@@ -20,7 +20,7 @@ PostgreSQL, Redis and SMTP are **not verified post-quantum channels**. Ordinary 
 
 | Path | Implemented boundary | Deployment action still needed |
 | --- | --- | --- |
-| Recipient/staff browser to HTTPS edge | `deploy/pq-nginx.conf`: PQ-only TLS 1.3, negotiated-group check, no resumption or early data | Install trusted hostname certificate; validate supported NGINX/OpenSSL build and actual browsers |
+| Browser to HTTPS edge | `deploy/pq-nginx.conf`: TLS 1.3; recipient hybrid preference with X25519 fallback and group telemetry; staff content requires hybrid; no resumption or early data | Install trusted hostname certificate; measure real browser/proxy support during pilot |
 | Edge to Django | Permission-controlled Unix socket; no plaintext TCP backend | Run candidate Gunicorn Unix bind; share the socket only with the gateway, not untrusted containers |
 | Django/workers to key service | `PQ_TRANSPORT_REQUIRED=true` uses strict mTLS and checks the group before HTTP request data | Set the workload PKI paths and deploy the upgraded runtime |
 | Custodian browser to key service | Key-service CLI defaults to PQ-required; existing mTLS, password, CSRF and origin checks stay | Trusted dedicated maintenance hostname and custodian certificates; no TLS-terminating intermediary that changes peer identity |

@@ -12,7 +12,8 @@ def process_pending_task():
 def archive_audit_task():
     from .audit import archive_pending
 
-    archive_pending()
+    if archive_pending():
+        archive_audit_task.delay()
 
 
 @shared_task(name="securemail.cleanup_transient", ignore_result=True)

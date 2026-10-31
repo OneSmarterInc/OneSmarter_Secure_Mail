@@ -11,6 +11,8 @@ export interface User {
   mfa_confirmed: boolean;
 }
 export interface Session {
+  idle_expires_at?: number;
+  absolute_expires_at?: number;
   user: User | null;
   csrf: string;
   synthetic_mode: boolean;

@@ -76,3 +76,12 @@ See [P2_REMEDIATION.md](P2_REMEDIATION.md) for capability configuration, require
 ## 29 October v2 review follow-up
 
 See [V2_REMEDIATION.md](V2_REMEDIATION.md) for per-finding source status, tests and rollout requirements. Code remediation does not close independent review, provider password rotation, off-host custody, external rollback anchoring or deployment evidence. N-17 remains partial because full audit-history snapshots still hold the key-store lock and post-commit publication crashes need reconciliation. Production remains blocked.
+
+## QA-06–09 validation update
+
+See [QA-06–09 remediation](QA_06_09_REMEDIATION.md). Recipient classical TLS fallback
+is now explicit, not PQ-only. Before release, validate real nginx hybrid/classical
+negotiation and staff upgrade-only responses; run archive backlog/retry load against
+actual PostgreSQL and Object Lock S3; connect archive-lag and sustained-login-failure
+signals to operational paging. Local synthetic load and browser tests do not satisfy
+those live-service gates.

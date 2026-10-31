@@ -255,7 +255,27 @@ class AuditEvent(models.Model):
         raise ValueError("Audit events cannot be deleted.")
 
 
+class AuditBatch(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT)
+    sequence = models.PositiveBigIntegerField()
+    previous_digest = models.CharField(max_length=64)
+    digest = models.CharField(max_length=64)
+    payload = models.TextField()
+    retain_until = models.DateTimeField()
+    version_id = models.CharField(max_length=300, blank=True)
+    archived_at = models.DateTimeField(null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "sequence"], name="unique_audit_batch_sequence"
+            )
+        ]
+
+
 class AuditArchive(models.Model):
+    batch = models.ForeignKey(AuditBatch, null=True, on_delete=models.PROTECT)
     event = models.OneToOneField(
         AuditEvent, on_delete=models.PROTECT, primary_key=True, related_name="archive"
     )
@@ -378,3 +398,9 @@ class MetadataToken(models.Model):
         indexes = [
             models.Index(fields=["organization", "kind", "token"], name="metadata_word_lookup")
         ]
+
+
+class LoginFailureState(models.Model):
+    user = models.OneToOneField(StaffUser, on_delete=models.CASCADE, primary_key=True)
+    failures = models.PositiveIntegerField(default=0)
+    window_started = models.DateTimeField(default=timezone.now)

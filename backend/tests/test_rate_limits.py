@@ -12,7 +12,7 @@ from backend.apps.core.services import keyed, rate_limit
 
 
 @pytest.mark.django_db
-def test_correct_password_cannot_bypass_account_throttle(client, staff, monkeypatch):
+def test_correct_password_cannot_bypass_source_network_throttle(client, staff, monkeypatch):
     from backend.apps.core import auth
 
     now = timezone.now()
@@ -32,23 +32,23 @@ def test_correct_password_cannot_bypass_account_throttle(client, staff, monkeypa
         assert login("wrong-password", f"198.51.100.{index + 1}").status_code == 401
     correct = "A-strong-test-only-password!"
     for password in (correct, "wrong-password"):
-        response = login(password, "203.0.113.1", staff.email.upper())
+        response = login(password, "198.51.100.100", staff.email.upper())
         assert response.status_code == 429
         assert response["Retry-After"] == "6"
         assert response.json()["error"]["code"] == "rate_limited"
         assert "pending_user" not in client.session
     assert authenticate.call_count == 10
     now += timedelta(seconds=5)
-    response = login(correct, "203.0.113.2")
+    response = login(correct, "198.51.100.101")
     assert response.status_code == 429
     assert response["Retry-After"] == "1"
     assert authenticate.call_count == 10
     now += timedelta(seconds=1)
-    assert login(correct, "203.0.113.3").status_code == 200
+    assert login(correct, "198.51.100.102").status_code == 200
     assert authenticate.call_count == 11
     assert client.session["pending_user"] == staff.pk
     # A successful password does not reset the account budget.
-    assert login(correct, "203.0.113.4").status_code == 429
+    assert login(correct, "198.51.100.103").status_code == 429
 
 
 def request(peer="127.0.0.1", forwarded="198.51.100.1"):
@@ -173,7 +173,7 @@ def test_login_account_minute_budget_and_no_global_lockout(client, monkeypatch):
 
     for index in range(10):
         assert login("a@onesmarter.com", f"198.51.100.{index + 1}").status_code == 401
-    assert login("A@onesmarter.com", "203.0.113.1").status_code == 429
+    assert login("A@onesmarter.com", "198.51.100.100").status_code == 429
     assert len(calls) == 10  # Throttled requests do not run password hashing.
     assert login("b@onesmarter.com", "203.0.113.1").status_code == 401
     now += timedelta(minutes=1)

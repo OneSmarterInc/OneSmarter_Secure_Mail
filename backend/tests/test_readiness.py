@@ -78,7 +78,7 @@ def test_archive_verification_projection_and_tampering(org, settings, monkeypatc
         audit_module.archive_pending()
     assert not AuditArchive.objects.filter(event=new).exists()
     fake.corrupt, fake.mode = False, "GOVERNANCE"
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError):
         audit_module.archive_pending()
     assert not AuditArchive.objects.filter(event=new).exists()
 

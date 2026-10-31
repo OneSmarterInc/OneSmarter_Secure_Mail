@@ -24,7 +24,12 @@ def test_pq_hosts_have_separate_upstreams_and_tls_guards():
     ):
         assert f"server_name {host};" in block
         assert f'if ($ssl_server_name != "{host}") {{ return 421; }}' in block
-        assert 'if ($ssl_curve != "X25519MLKEM768") { return 403; }' in block
+        if block == staff:
+            assert 'if ($ssl_curve != "X25519MLKEM768") { return 403; }' in block
+        else:
+            assert "ssl_ecdh_curve X25519MLKEM768:X25519;" in block
+            assert "if ($ssl_curve" not in block
+            assert "recipient_transport;" in block
         assert block.count("proxy_pass ") == 1
         assert re.search(r"location (?:\^~ )?" + namespace + r" \{\s+proxy_pass", block)
     assert "location ^~ /api/ { return 404; }" in recipient

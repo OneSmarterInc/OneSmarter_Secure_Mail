@@ -315,11 +315,20 @@ After a successful session check, temporary polling failures retain the last con
 
 Staff replies issue fresh notification links while retaining previous invitation hashes for the same recipient grant. Original and subsequent links remain valid only while the grant and conversation are active and unexpired and the owner remains active. Every link still requires email OTP verification; links do not grant direct document access. Retained hashes contain no plaintext invitation secrets. Links invalidated before token-history support was deployed cannot be reconstructed from the current grant hash; send a fresh notification for those recipients.
 
-### Staff login rate limit (30 October 2026)
+### Staff login and idle controls (31 October 2026; QA-08/09)
 
-Use independent per-account token buckets: capacity 10 attempts, refilled over 60 seconds. Count all password attempts before authentication, normalize email case, and do not share an application-global login bucket. Retain a separate 50-attempt per-IP bucket over 60 seconds to constrain spraying. One account exhausting its allowance must not consume another account's allowance; users on the same IP still share the separate IP protection.
+Login token buckets allow 10 attempts per account/source network per minute and
+50 per source IP per minute. IPv4 uses /24 and IPv6 /64. These hard budgets run
+before password hashing. An exhausted network cannot lock the account on an
+unrelated network; correct passwords still require MFA. Sustained known-account
+failures generate audit/monitoring alerts and advisory exponential Retry-After
+responses, without an application-global hard login lock.
 
-An exhausted account returns the same 429 before password hashing for correct and incorrect passwords, including from new IPs. Throttled responses include `Retry-After` for the rejecting bucket. Account refill admits one further attempt every six seconds; denied retries do not restart the cooldown, and a correct password does not reset the budget. This bounded backoff avoids sleeping request workers or adding an indefinite escalating account lockout; MFA remains mandatory after an admitted successful password check.
+Staff sessions lock after 15 minutes of inactivity (configurable) with an eight-hour
+absolute lifetime. Background polling does not renew activity. A server-validated
+activity request follows real UI interaction. The UI warns one minute before locking
+and hides protected content even if connectivity fails. See QA_06_09_REMEDIATION.md
+for the shared-network and distributed-abuse tradeoffs.
 
 ## Organisation SMTP and secure conversation threads (31 October 2026)
 
@@ -360,3 +369,12 @@ This supersedes earlier 1/7/30-day conversation/link expiry requirements. Recipi
 ## Recipient reply routing update — 2026-10-31
 
 Recipient private replies always go to the assigned staff owner, even when the selected message was authored by another recipient. They are visible only to that replying recipient and the owner, including attachments; the owner receives a notification. Reply all remains shared with eligible To/Cc recipients and visible to the owner. BCC private copies cannot reply all. Staff can still reply privately to a recipient. Historical recipient-to-recipient private messages are now visible to the assigned owner for review; administrator status alone does not grant content access. Submission audit metadata records reply mode and whether a recipient reply is private to the owner. This supersedes earlier recipient-to-recipient private reply behavior.
+
+## QA-06/07 policy update (31 October 2026)
+
+Audit Object Lock archiving uses chained batches of up to 1000 events, continuous
+bounded draining and a 15-minute oldest-pending alert threshold. Verification precedes
+archive status. Public recipient TLS may use classical X25519 when hybrid ML-KEM is
+unavailable; this hop is no longer claimed to be PQ-only. Staff content and internal
+controlled hops retain the hybrid requirement. Measure recipient group support during
+pilot. Independent cryptographic review remains a production gate.

@@ -20,6 +20,7 @@ urlpatterns = [
     path("recipient-api/attachments/<uuid:ident>", mail.download),
     path("api/health", views.health),
     path("api/auth/session", auth.session),
+    path("api/auth/activity", auth.activity),
     path("api/auth/setup", auth.setup),
     path("api/auth/login", auth.sign_in),
     path("api/auth/enroll", auth.enrollment),

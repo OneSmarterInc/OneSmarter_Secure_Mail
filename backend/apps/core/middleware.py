@@ -1,3 +1,4 @@
+import time
 import uuid
 
 from django.conf import settings
@@ -50,8 +51,34 @@ class SecurityContextMiddleware:
                 or request.session.get("staff_version") != request.user.session_version
             ):
                 logout(request)
-            elif request.method not in {"GET", "HEAD", "OPTIONS"}:
-                StaffUser.objects.filter(pk=request.user.pk).update(last_activity=timezone.now())
+            else:
+                now = time.time()
+                # Legacy sessions acquire a fixed absolute start once; step-up
+                # must never extend it. Polling does not renew idle activity.
+                started = request.session.setdefault(
+                    "staff_started_at", request.session.get("mfa_at", 0)
+                )
+                last_seen = request.session.setdefault("staff_last_seen", started)
+                if (
+                    now - started >= settings.STAFF_ABSOLUTE_SECONDS
+                    or now - last_seen >= settings.STAFF_IDLE_SECONDS
+                ):
+                    logout(request)
+                    response = JsonResponse(
+                        {
+                            "error": {
+                                "message": "Your session locked after inactivity or reached its time limit. Sign in again.",
+                                "code": "session_expired",
+                            }
+                        },
+                        status=401,
+                    )
+                    response["Cache-Control"] = "no-store"
+                    return response
+                if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                    StaffUser.objects.filter(pk=request.user.pk).update(
+                        last_activity=timezone.now()
+                    )
         response = self.get_response(request)
         if request.path.startswith(("/api/", "/recipient-api/")):
             response["X-Request-ID"] = request.request_id
