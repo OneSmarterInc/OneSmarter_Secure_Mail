@@ -15,3 +15,7 @@ ClamAV's default TCP health check is documented at https://docs.clamav.net/manua
 
 
 Container verification found high-severity Debian base-package advisories without fixes listed. Candidate Python runtimes now use pinned Alpine images and are revalidated through the same Compose and real PQ tests. The Trivy gate scans all three built images before reporting failure; no vulnerability ignores or severity downgrades are used.
+
+Runtime images remove pip and ensurepip after dependency installation, including their unused vendored dependencies. The nginx runtime applies Alpine security updates during build. All three container scans passed on revision 4c10668, alongside PostgreSQL, real ClamAV, nginx and PQ transport checks. The recipient navigation contrast now has an Axe regression test. Browser assertions distinguish synthetic scanning (disabled health button) from the dedicated real-scanner job.
+
+Local full backend result: 359 passed, 17 skipped; service-dependent evidence comes from CI, not these local skips. Keep the production release gates open.

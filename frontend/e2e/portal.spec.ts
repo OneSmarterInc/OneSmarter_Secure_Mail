@@ -315,9 +315,13 @@ test("staff request → recipient upload → staff read; accounts and immutable 
   await expect(
     page.getByText("Not sending email", { exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Check scanner health" }).click();
+  // This disposable browser stack uses synthetic scanning; the separate
+  // scanner job verifies actual ClamAV, current signatures and EICAR rejection.
   await expect(
-    page.getByText("Unavailable or signatures stale", { exact: true }),
+    page.getByRole("button", { name: "Check scanner health" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByText("Antivirus disabled", { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Your notification activity" }),
