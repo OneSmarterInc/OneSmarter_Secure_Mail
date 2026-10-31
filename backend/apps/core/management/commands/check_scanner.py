@@ -12,5 +12,5 @@ class Command(BaseCommand):
         try:
             result = scanner_health()
         except (OSError, ValueError) as exc:
-            raise CommandError("ClamAV is unavailable or its signatures are not current.") from exc
+            raise CommandError(f"ClamAV readiness failed: {exc}") from exc
         self.stdout.write(json.dumps(result))

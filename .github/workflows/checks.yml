@@ -110,6 +110,7 @@ jobs:
     env:
       APP_ENV: test
       RUN_CLAMAV_INTEGRATION: "1"
+      SCAN_PROVIDER: clamav
       CLAMAV_TRANSPORT: unix
       CLAMAV_SOCKET: /tmp/onesmarter-scanner/clamd.sock
     steps:
@@ -134,7 +135,14 @@ jobs:
           done
           exit 1
       - run: sudo chgrp "$(id -g)" "$CLAMAV_SOCKET"
-      - run: python manage.py check_scanner
+      - name: Verify loaded signatures through the application socket
+        run: |
+          docker exec readiness-clamav clamdscan --config-file=/etc/clamav/clamd.conf --reload
+          for attempt in $(seq 1 30); do
+            if python manage.py check_scanner; then exit 0; fi
+            sleep 2
+          done
+          exit 1
       - run: pytest backend/tests/test_readiness.py::test_real_clamav_clean_and_eicar backend/tests/test_scanner.py -q
       - name: Scanner diagnostics
         if: failure()

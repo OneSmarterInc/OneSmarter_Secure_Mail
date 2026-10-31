@@ -58,7 +58,7 @@ def test_real_nginx_pq_host_routing(tmp_path):
     config.write_text(
         f"daemon off; master_process off; pid {tmp_path.as_posix()}/nginx.pid;\n"
         f"error_log {tmp_path.as_posix()}/error.log;\nevents {{}}\nhttp {{\n"
-        f"client_body_temp_path {tmp_path.as_posix()}/body;\n"
+        f"access_log off;\nclient_body_temp_path {tmp_path.as_posix()}/body;\n"
         f"proxy_temp_path {tmp_path.as_posix()}/proxy;\n{source}\n}}\n"
     )
     process = subprocess.Popen(
