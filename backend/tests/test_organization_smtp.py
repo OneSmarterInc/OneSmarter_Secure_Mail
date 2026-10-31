@@ -147,7 +147,7 @@ def test_old_invite_is_still_delivered_after_new_request(staff_client):
     assert DeliveryJob.objects.filter(state="development_delivered").count() == 2
 
 
-def test_expired_chat_renews_without_reactivating_old_links(staff_client):
+def test_historical_deadline_does_not_expire_original_link(staff_client):
     first = compose(staff_client).json()["id"]
     conversation = Conversation.objects.get(pk=first)
     old = mail.payload(DeliveryJob.objects.get(conversation=conversation))["link"].rsplit("/", 1)[
@@ -156,7 +156,7 @@ def test_expired_chat_renews_without_reactivating_old_links(staff_client):
     conversation.expires_at = timezone.now() - timedelta(days=1)
     conversation.save()
     assert compose(staff_client).json()["id"] == first
-    assert post(staff_client, "/recipient/code", {"token": old}).status_code == 404
+    assert post(staff_client, "/recipient/code", {"token": old}).status_code == 200
 
 
 def test_private_attachment_copies(staff_client):

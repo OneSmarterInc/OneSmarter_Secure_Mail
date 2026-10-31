@@ -360,7 +360,6 @@ export function Compose({ user }: { user: User }) {
   const [acknowledged, setAcknowledged] = useState(false);
   const [routeSignature, setRouteSignature] = useState("");
   const [routeRevision, setRouteRevision] = useState(0);
-  const [expiry, setExpiry] = useState(7);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const [route, setRoute] = useState<{
@@ -380,7 +379,6 @@ export function Compose({ user }: { user: User }) {
     bcc,
     subject,
     body,
-    expiry_days: expiry,
     attachments: files.map((f) => f.id),
     nophi_override: nophi,
     nophi_acknowledged: acknowledged,
@@ -623,21 +621,9 @@ export function Compose({ user }: { user: User }) {
               </small>
             </div>
             <ErrorNotice message={routeError} />
-            <label>
-              Recipient access expires
-              <select
-                value={expiry}
-                onChange={(e) => setExpiry(Number(e.target.value))}
-                disabled={route?.protected === false}
-              >
-                <option value={1}>After 1 day</option>
-                <option value={7}>After 7 days</option>
-                <option value={30}>After 30 days</option>
-              </select>
-            </label>
             <small>
-              Access expiry does not delete retained records or recall
-              downloaded files.
+              Invitation links do not expire. Recipients verify their email each
+              session. You can revoke access from conversation actions.
             </small>
           </div>
         </aside>
@@ -648,8 +634,10 @@ export function Compose({ user }: { user: User }) {
 
 export function ThreadContent({
   conversation,
+  recipientMode = false,
 }: {
   conversation: Conversation;
+  recipientMode?: boolean;
 }) {
   const threadRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -866,8 +854,14 @@ export function ThreadContent({
                 <button
                   type="button"
                   className="message-reply-button"
-                  aria-label="Reply to sender"
-                  title="Reply to sender"
+                  aria-label={
+                    recipientMode ? "Reply to staff" : "Reply to sender"
+                  }
+                  title={
+                    recipientMode
+                      ? "Reply privately to staff"
+                      : "Reply to sender"
+                  }
                   onClick={() => chooseReply(message.id, "sender")}
                 >
                   <Icon name="reply" size={18} />
@@ -1083,12 +1077,21 @@ export function ReplyForm({
                   setAudience("");
                 }}
               >
-                <option value="sender">Reply to sender only</option>
+                <option value="sender">
+                  {recipientMode
+                    ? "Reply privately to staff"
+                    : "Reply to sender only"}
+                </option>
                 <option value="all">Reply all — sender and To/Cc</option>
               </select>
             </label>
           )}
-          {replyTo && (
+          {recipientMode && replyMode === "sender" && (
+            <p className="muted">
+              Only the staff owner receives this reply and its attachments.
+            </p>
+          )}
+          {replyTo && !recipientMode && (
             <p className="muted">
               Replying to{" "}
               {conversation.messages?.find((m) => m.id === replyTo)?.headers
@@ -1221,7 +1224,7 @@ export function MailDetail({ id }: { id: string }) {
       <ErrorNotice message={resource.error || "Conversation unavailable."} />
     );
   const c = resource.data;
-  const closed = c.revoked || new Date(c.expires_at) <= new Date();
+  const closed = c.revoked;
   const deliveries = c.delivery ?? [];
   const attention = deliveries.filter((d) =>
     ["failed", "uncertain"].includes(d.state),
@@ -1327,8 +1330,8 @@ export function MailDetail({ id }: { id: string }) {
                 {closed ? "Access ended" : "Active"}
               </Badge>
               <dl>
-                <dt>Expires</dt>
-                <dd>{formatDate(c.expires_at)}</dd>
+                <dt>Link access</dt>
+                <dd>Until revoked</dd>
                 <dt>Delivery</dt>
                 <dd>{c.protected ? "Secure portal" : "Normal email"}</dd>
               </dl>

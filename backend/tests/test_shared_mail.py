@@ -86,23 +86,39 @@ def test_reply_all_is_shared_but_sender_reply_is_private_with_files(staff_client
     assert any(m["id"] == message_id for m in other["messages"])
     assert b.get("/api/attachments/" + upload.json()["id"]).content == b"shared attachment"
     assert blind.get("/api/attachments/" + upload.json()["id"]).status_code == 404
+    private_upload = b.post(
+        "/api/recipient/attachments",
+        {"file": SimpleUploadedFile("private.txt", b"owner only", content_type="text/plain")},
+    )
+    assert private_upload.status_code == 201
+    private_file = private_upload.json()["id"]
     before = DeliveryJob.objects.count()
     private = post(
         b,
         "/recipient/conversation",
-        {"body": "only original sender", "reply_mode": "sender", "reply_to": message_id},
+        {
+            "body": "only staff owner",
+            "reply_mode": "sender",
+            "reply_to": message_id,
+            "attachments": [private_file],
+        },
     )
     assert private.status_code == 201, private.content
     private_id = private.json()["id"]
-    assert any(
+    assert not any(
         m["id"] == private_id for m in a.get("/api/recipient/conversation").json()["messages"]
     )
-    assert not any(
+    assert any(
         m["id"] == private_id
         for m in staff_client.get("/api/conversations/" + ident).json()["messages"]
     )
     assert DeliveryJob.objects.count() == before + 1
-    assert payload(DeliveryJob.objects.latest("created_at"))["to"] == "a@example.com"
+    assert payload(DeliveryJob.objects.latest("created_at"))["to"] == "staff@onesmarter.com"
+    assert Message.objects.get(pk=private_id).audience_id is None
+    assert staff_client.get(f"/api/attachments/{private_file}").content == b"owner only"
+    assert b.get(f"/api/attachments/{private_file}").content == b"owner only"
+    assert a.get(f"/api/attachments/{private_file}").status_code == 404
+    assert blind.get(f"/api/attachments/{private_file}").status_code == 404
     assert (
         post(
             blind, "/recipient/conversation", {"body": "attempt", "reply_to": message_id}
@@ -149,3 +165,65 @@ def test_private_reply_without_target_cannot_broadcast(staff_client):
     )
     assert response.status_code == 400
     assert Message.objects.count() == before
+
+
+@pytest.mark.parametrize("group", [False, True])
+def test_links_survive_old_deadlines_and_new_messages(staff_client, group):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from backend.apps.core.models import OTPChallenge, RecipientSession
+
+    recipients = {"to": ["a@example.com"]}
+    if group:
+        recipients["cc"] = ["b@example.com"]
+    created = compose(staff_client, **recipients)
+    ident = created.json()["id"]
+    conversation = Conversation.objects.get(pk=ident)
+    assert conversation.expires_at is None
+    token = payload(DeliveryJob.objects.filter(conversation=conversation).first())["link"].rsplit(
+        "/", 1
+    )[-1]
+    visitor = access("a@example.com")
+    Conversation.objects.filter(pk=ident).update(expires_at=timezone.now() - timedelta(days=90))
+    assert visitor.get("/api/recipient/conversation").status_code == 200
+    assert compose(staff_client, **recipients).json()["id"] == ident
+    assert post(Client(), "/recipient/landing", {"token": token}).status_code == 200
+    reply = post(
+        staff_client,
+        f"/conversations/{ident}/messages",
+        {"body": "Still open", "reply_mode": "all" if group else "sender"},
+    )
+    assert reply.status_code == 201, reply.content
+    RecipientSession.objects.update(expires_at=timezone.now() - timedelta(seconds=1))
+    assert visitor.get("/api/recipient/conversation").status_code == 401
+    # Respect resend cooldown while simulating a later verification.
+    OTPChallenge.objects.update(created_at=timezone.now() - timedelta(minutes=1))
+    # Session timeout does not invalidate the invitation; a new OTP is required.
+    assert post(Client(), "/recipient/code", {"token": token}).status_code == 200
+    Conversation.objects.filter(pk=ident).update(revoked_at=timezone.now())
+    assert post(Client(), "/recipient/code", {"token": token}).status_code == 404
+
+
+def test_owner_can_review_historical_recipient_private_messages(staff_client, admin_client):
+    ident, a, b, _ = setup_group(staff_client)
+    upload = a.post(
+        "/api/recipient/attachments",
+        {"file": SimpleUploadedFile("history.txt", b"historical file", content_type="text/plain")},
+    )
+    assert upload.status_code == 201
+    file_id = upload.json()["id"]
+    sent = post(
+        a, "/recipient/conversation", {"body": "Historical private reply", "attachments": [file_id]}
+    )
+    assert sent.status_code == 201
+    message = Message.objects.get(pk=sent.json()["id"])
+    # Reproduce the historical row shape without re-enabling the old API behavior.
+    message.audience = message.conversation.grants.get(email="b@example.com")
+    message.save(update_fields=["audience"])
+    view = staff_client.get(f"/api/conversations/{ident}")
+    assert any(row["id"] == str(message.pk) for row in view.json()["messages"])
+    assert staff_client.get(f"/api/attachments/{file_id}").content == b"historical file"
+    assert admin_client.get(f"/api/attachments/{file_id}").status_code == 401
+    assert admin_client.get(f"/api/conversations/{ident}").status_code == 404

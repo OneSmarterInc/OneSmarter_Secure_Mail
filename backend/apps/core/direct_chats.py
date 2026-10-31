@@ -1,7 +1,6 @@
 """Private, continuing secure chats, one per staff member and recipient."""
 
 import secrets
-from datetime import timedelta
 
 from django.conf import settings
 from django.db.models import Count
@@ -17,7 +16,6 @@ from .models import (
     Message,
     RecipientGrant,
     RecipientInvitationToken,
-    RecipientSession,
 )
 from .services import audit, digest, queue_mail
 
@@ -67,7 +65,7 @@ def compose_private(
                 protected=True,
                 routing_reason=decision.reason,
                 policy_version="2026-10-31-private-chat",
-                expires_at=timezone.now() + timedelta(days=data["expiry_days"]),
+                expires_at=None,
             )
             conversation.subject_ciphertext = crypto.encrypt(
                 (data["subject"] or "Secure information request").encode(),
@@ -89,30 +87,18 @@ def compose_private(
         grant = conversation.grants.first()
         if grant and grant.revoked_at:
             raise Problem("Recipient access was revoked for this chat.", status=409)
-        expired = conversation.expires_at <= timezone.now()
         token = secrets.token_urlsafe(32)
         if grant:
-            if expired:
-                RecipientInvitationToken.objects.filter(grant=grant).delete()
-                RecipientSession.objects.filter(grant=grant, revoked_at=None).update(
-                    revoked_at=timezone.now()
-                )
-            else:
-                RecipientInvitationToken.objects.get_or_create(
-                    grant=grant, token_hash=grant.token_hash
-                )
+            RecipientInvitationToken.objects.get_or_create(grant=grant, token_hash=grant.token_hash)
             grant.token_hash = digest(token)
             grant.save(update_fields=["token_hash"])
         else:
             grant = RecipientGrant.objects.create(
                 conversation=conversation, email=email, kind=kinds[email], token_hash=digest(token)
             )
-        conversation.expires_at = max(
-            conversation.expires_at, timezone.now() + timedelta(days=data["expiry_days"])
-        )
         conversation.updated_at = timezone.now()
         conversation.state = "awaiting_recipient"
-        conversation.save(update_fields=["expires_at", "updated_at", "state"])
+        conversation.save(update_fields=["updated_at", "state"])
         message = Message(
             conversation=conversation,
             staff=user,
@@ -233,7 +219,7 @@ def compose_secure(user, data, decision, record):
             protected=True,
             routing_reason=decision.reason,
             policy_version="2026-10-31-shared-chat",
-            expires_at=timezone.now() + timedelta(days=data["expiry_days"]),
+            expires_at=None,
         )
         conversation.subject_ciphertext = crypto.encrypt(
             (data["subject"] or "Secure information request").encode(),
@@ -243,13 +229,9 @@ def compose_secure(user, data, decision, record):
         GroupChat.objects.create(
             owner=user, participants_hash=group_hash, conversation=conversation
         )
-    expired = conversation.expires_at <= timezone.now()
-    conversation.expires_at = max(
-        conversation.expires_at, timezone.now() + timedelta(days=data["expiry_days"])
-    )
     conversation.updated_at = timezone.now()
     conversation.state = "awaiting_recipient"
-    conversation.save(update_fields=["expires_at", "updated_at", "state"])
+    conversation.save(update_fields=["updated_at", "state"])
     message = Message(conversation=conversation, staff=user, shared=True, mail_headers=header)
     message.body_ciphertext = crypto.encrypt(
         (data["subject"] + "\n\n" + data["body"]).strip().encode(), message_context(message)
@@ -261,15 +243,7 @@ def compose_secure(user, data, decision, record):
         kind = "to" if email in header["to"] else "cc"
         grant = conversation.grants.filter(email=email).first()
         if grant:
-            if expired:
-                RecipientInvitationToken.objects.filter(grant=grant).delete()
-                RecipientSession.objects.filter(grant=grant, revoked_at=None).update(
-                    revoked_at=timezone.now()
-                )
-            else:
-                RecipientInvitationToken.objects.get_or_create(
-                    grant=grant, token_hash=grant.token_hash
-                )
+            RecipientInvitationToken.objects.get_or_create(grant=grant, token_hash=grant.token_hash)
             grant.token_hash = digest(token)
             grant.kind = kind
             grant.save(update_fields=["token_hash", "kind"])

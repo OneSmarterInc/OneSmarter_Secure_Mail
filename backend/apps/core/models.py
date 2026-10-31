@@ -63,7 +63,9 @@ class Conversation(models.Model):
     routing_reason = models.CharField(max_length=40)
     policy_version = models.CharField(max_length=64, default="2026-10-27-v1")
     subject_ciphertext = models.TextField()
-    expires_at = models.DateTimeField()
+    search_indexed = models.BooleanField(default=False)
+    # Historical deadline only; recipient links now remain valid until revoked.
+    expires_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True)
     state = models.CharField(max_length=20, default="awaiting_recipient")
     created_at = models.DateTimeField(default=timezone.now)
@@ -126,6 +128,7 @@ class Attachment(models.Model):
     uploader = models.ForeignKey(StaffUser, null=True, on_delete=models.PROTECT)
     grant = models.ForeignKey(RecipientGrant, null=True, on_delete=models.PROTECT)
     name_ciphertext = models.TextField()
+    search_indexed = models.BooleanField(default=False)
     object_key = models.CharField(max_length=200)
     size = models.PositiveIntegerField()
     stored_size = models.PositiveIntegerField(default=0)
@@ -355,4 +358,23 @@ class GroupChat(models.Model):
             models.UniqueConstraint(
                 fields=["owner", "participants_hash"], name="unique_staff_group_chat"
             )
+        ]
+
+
+class MetadataToken(models.Model):
+    """HMAC word index; authorization remains on the original resource query."""
+
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE)
+    kind = models.CharField(max_length=12)
+    resource_id = models.UUIDField()
+    token = models.CharField(max_length=64)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "kind", "resource_id", "token"], name="unique_metadata_word"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["organization", "kind", "token"], name="metadata_word_lookup")
         ]

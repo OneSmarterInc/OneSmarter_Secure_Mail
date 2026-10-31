@@ -107,7 +107,6 @@ def active_grant(grant):
         or not grant.conversation.owner.is_active
         or grant.revoked_at
         or grant.conversation.revoked_at
-        or grant.conversation.expires_at <= timezone.now()
         or not grant.conversation.protected
     ):
         unavailable()
@@ -141,14 +140,16 @@ def owned(request, ident):
     return value if value else unavailable()
 
 
-def attachment_data(attachment):
+def attachment_data(attachment, name=None):
     return {
         "id": str(attachment.pk),
         "sha256": attachment.sha256,
         "capture_id": str(attachment.evidence_capture_id)
         if attachment.evidence_capture_id
         else None,
-        "name": crypto.decrypt(
+        "name": name
+        if name is not None
+        else crypto.decrypt(
             attachment.name_ciphertext,
             crypto.context(attachment.organization_id, "filename", attachment.pk),
         ).decode(),
@@ -172,7 +173,7 @@ def summary(conversation, subject=None):
         "state": conversation.state,
         "created_at": conversation.created_at,
         "updated_at": conversation.updated_at,
-        "expires_at": conversation.expires_at,
+        "expires_at": None,
         "revoked": bool(conversation.revoked_at),
         "unread": conversation.last_staff_read is None
         or conversation.updated_at > conversation.last_staff_read,
@@ -199,7 +200,9 @@ def visible_messages(query, grant):
 
 
 def staff_visible_messages(query):
-    return query.exclude(grant__isnull=False, audience__isnull=False, shared=False)
+    # Callers scope the queryset to the authorized owner/conversation first.
+    # Include historical recipient-to-recipient messages for owner oversight.
+    return query
 
 
 def safe_headers(message, viewer):
@@ -219,19 +222,6 @@ def safe_headers(message, viewer):
 
 
 def detail(conversation, grant=None):
-    data = (
-        summary(conversation)
-        if grant is None
-        else {
-            "id": str(conversation.pk),
-            "subject": crypto.decrypt(
-                conversation.subject_ciphertext, subject_context(conversation)
-            ).decode(),
-            "expires_at": conversation.expires_at,
-            "mode": conversation.mode,
-            "state": conversation.state,
-        }
-    )
     messages = (
         conversation.messages.select_related("staff", "grant", "conversation")
         .prefetch_related("attachments")
@@ -241,6 +231,27 @@ def detail(conversation, grant=None):
         messages = visible_messages(messages, grant)
     else:
         messages = staff_visible_messages(messages)
+    messages = list(messages)
+    files = [a for m in messages for a in m.attachments.all()]
+    values = [(conversation.subject_ciphertext, subject_context(conversation))]
+    values.extend((m.body_ciphertext, message_context(m)) for m in messages)
+    values.extend(
+        (a.name_ciphertext, crypto.context(a.organization_id, "filename", a.pk)) for a in files
+    )
+    decoded = [value.decode() for value in crypto.decrypt_many(values)]
+    bodies = dict(zip((m.pk for m in messages), decoded[1 : 1 + len(messages)], strict=True))
+    names = dict(zip((a.pk for a in files), decoded[1 + len(messages) :], strict=True))
+    data = (
+        summary(conversation, decoded[0])
+        if grant is None
+        else {
+            "id": str(conversation.pk),
+            "subject": decoded[0],
+            "expires_at": None,
+            "mode": conversation.mode,
+            "state": conversation.state,
+        }
+    )
     data["can_reply_all"] = conversation.grants.filter(revoked_at=None).count() > 1 and (
         grant is None or grant.kind != "bcc"
     )
@@ -256,9 +267,9 @@ def detail(conversation, grant=None):
             "reply_to": str(m.reply_to_message_id) if m.reply_to_message_id else None,
             "shared": m.shared,
             "audience": str(m.audience_id) if m.audience_id else None,
-            "body": crypto.decrypt(m.body_ciphertext, message_context(m)).decode(),
+            "body": bodies[m.pk],
             "created_at": m.created_at,
-            "attachments": [attachment_data(a) for a in m.attachments.all()],
+            "attachments": [attachment_data(a, names[a.pk]) for a in m.attachments.all()],
         }
         for m in messages
     ]
@@ -375,30 +386,19 @@ def conversations(request):
         subjects = {}
         if search:
             rate_limit(request, "conversation_search", str(user.pk), maximum=10, seconds=60)
-            # No plaintext subject index or search-term persistence. Fail explicitly
-            # rather than return incomplete results when the bounded scan is exceeded.
-            candidates = list(query.order_by("pk")[:1001])
-            if len(candidates) > 1000:
+            from . import search_index
+
+            if query.filter(search_indexed=False).exists():
                 raise Problem(
-                    "Search is limited to 1000 conversations. Narrow the state filter.",
-                    "search_scope_too_large",
-                    422,
+                    "Conversation search index needs rebuilding.", "search_index_unavailable", 503
                 )
-            needle = search.casefold()
-            matches = []
-            decrypted = crypto.decrypt_many(
-                [(c.subject_ciphertext, subject_context(c)) for c in candidates]
-            )
-            for conversation, value in zip(candidates, decrypted, strict=True):
-                subject = value.decode()
-                subjects[conversation.pk] = subject
-                if (
-                    needle in subject.casefold()
-                    or needle in conversation.state.casefold()
-                    or any(needle in grant.email.casefold() for grant in conversation.grants.all())
-                ):
-                    matches.append(conversation.pk)
-            query = query.filter(pk__in=matches)
+            for word in search_index.words(search):
+                query = query.filter(
+                    Q(pk__in=search_index.ids(user.organization_id, "subject", word))
+                    | Q(state__icontains=word)
+                    | Q(grants__email__icontains=word)
+                )
+            query = query.distinct()
         items, meta = paginate(
             query,
             request,
@@ -406,7 +406,7 @@ def conversations(request):
             default="-updated_at",
         )
         items = list(items)
-        if not search:
+        if items:
             subjects = {
                 c.pk: value.decode()
                 for c, value in zip(
@@ -456,7 +456,7 @@ def conversations(request):
             protected=decision.protected,
             routing_reason=decision.reason,
             policy_version="2026-10-30-secure-default",
-            expires_at=timezone.now() + timedelta(days=data["expiry_days"]),
+            expires_at=None,
         )
         conversation.subject_ciphertext = crypto.encrypt(
             (data["subject"] or "Secure information request").encode(),
@@ -516,6 +516,7 @@ def conversations(request):
 @endpoint(["GET"], staff=True)
 def conversation_detail(request, ident):
     conversation = owned(request, ident)
+    rate_limit(request, "thread_read", str(request.user.pk), maximum=60, seconds=60)
     audit(
         request.user.organization,
         request.user,
@@ -584,11 +585,7 @@ def save_reply(request, conversation, data, *, user=None, grant=None):
             .select_related("organization", "owner")
             .get(pk=conversation.pk)
         )
-        if (
-            not conversation.protected
-            or conversation.revoked_at
-            or conversation.expires_at <= timezone.now()
-        ):
+        if not conversation.protected or conversation.revoked_at:
             raise Problem(
                 "This conversation no longer accepts replies.", "conversation_unavailable", 403
             )
@@ -621,7 +618,7 @@ def save_reply(request, conversation, data, *, user=None, grant=None):
             if grant and (grant.kind == "bcc" or conversation.grants.count() < 2):
                 raise Problem("Reply all is unavailable for a private copy.", status=400)
             audience = None
-        elif selected and selected.grant_id and (not grant or selected.grant_id != grant.pk):
+        elif user and selected and selected.grant_id:
             audience = selected.grant
             active_grant(audience)
         elif user and not audience and (selected or "reply_mode" in request.data):
@@ -667,7 +664,7 @@ def save_reply(request, conversation, data, *, user=None, grant=None):
         conversation.state = "replied" if grant else "awaiting_recipient"
         conversation.updated_at = timezone.now()
         conversation.save(update_fields=["state", "updated_at"])
-        if grant and (audience is None or shared):
+        if grant:
             queue_mail(
                 conversation.organization,
                 {
@@ -684,7 +681,7 @@ def save_reply(request, conversation, data, *, user=None, grant=None):
             )
         for target in targets:
             # Retain the old hash atomically with the new notification. All
-            # links inherit the grant's expiry/revocation and still require OTP.
+            # links remain subject to revocation and still require fresh OTP verification.
             RecipientInvitationToken.objects.get_or_create(
                 grant=target, token_hash=target.token_hash
             )
@@ -714,6 +711,8 @@ def save_reply(request, conversation, data, *, user=None, grant=None):
             metadata={
                 "author_type": "staff" if user else "recipient",
                 "file_count": len(data["attachments"]),
+                "reply_mode": data["reply_mode"],
+                "recipient_private_to_owner": bool(grant and not shared),
             },
         )
     return message.pk
@@ -877,6 +876,7 @@ def verify_code(request):
 def recipient_conversation(request):
     grant = recipient(request)
     if request.method == "GET":
+        rate_limit(request, "recipient_thread_read", str(grant.pk), maximum=60, seconds=60)
         audit(
             grant.conversation.organization,
             grant.pk,

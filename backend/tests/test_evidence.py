@@ -237,7 +237,7 @@ def test_message_attachment_without_source_is_recorded_as_upload_only(staff_clie
 
 def test_document_table_scoped_sort_and_original_download(staff_client, admin_client):
     row = submitted(staff_client)
-    response = staff_client.get("/api/evidence?view=documents&sort=filename")
+    response = staff_client.get("/api/evidence?view=documents&sort=uploaded_at")
     assert response.status_code == 200
     result = response.json()["results"][0]
     assert result["id"] == str(row.pk)

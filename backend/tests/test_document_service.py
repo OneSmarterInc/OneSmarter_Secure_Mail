@@ -114,3 +114,84 @@ def test_sealed_admission_defers_without_sending(
     job.refresh_from_db()
     assert job.state == "queued" and job.error_code == "service_disabled"
     assert document_service.read_status.call_count == 1
+
+
+def test_local_default_roundtrip_without_remote_status(staff_client, settings, monkeypatch):
+    from backend.apps.core.models import WrappingKeyVersion
+
+    settings.KEY_PROTECTOR = "local-development"
+    settings.SYNTHETIC_MODE = True
+    settings.KEY_STATUS_URL = ""
+    settings.KEY_SERVICE_URL = ""
+    remote = Mock(side_effect=AssertionError("Local crypto must not contact a remote service"))
+    monkeypatch.setattr(document_service, "pooled_client", remote)
+    assert document_service.ready()
+    visitor, conversation, _, _ = recipient_access(staff_client)
+    upload = visitor.post(
+        "/api/recipient/attachments",
+        {
+            "file": SimpleUploadedFile(
+                "preview.txt", b"synthetic round trip", content_type="text/plain"
+            )
+        },
+    )
+    assert upload.status_code == 201, upload.content
+    file_id = upload.json()["id"]
+    reply = post(visitor, "/recipient/conversation", {"body": "Uploaded", "attachments": [file_id]})
+    assert reply.status_code == 201, reply.content
+    assert staff_client.get(f"/api/attachments/{file_id}").content == b"synthetic round trip"
+    assert WrappingKeyVersion.objects.filter(state="active").exists()
+    for job in DeliveryJob.objects.filter(conversation=conversation):
+        process_job(job.pk)
+    # The OTP was consumed before the worker ran and is correctly cancelled.
+    assert DeliveryJob.objects.filter(state="development_delivered").count() == 2
+    assert not DeliveryJob.objects.exclude(
+        state__in=["development_delivered", "cancelled"]
+    ).exists()
+    remote.assert_not_called()
+
+
+@pytest.mark.parametrize("root_state", ["missing", "malformed", "wrong_length", "changed"])
+def test_local_readiness_checks_actual_root_file(staff_client, settings, root_state):
+    import base64
+    import secrets
+
+    from backend.apps.core import crypto
+
+    settings.KEY_PROTECTOR = "local-development"
+    assert document_service.ready()
+    if root_state == "missing":
+        settings.LOCAL_KEY_FILE.unlink()
+    else:
+        contents = {
+            "malformed": "not-base64!",
+            "wrong_length": base64.b64encode(b"short").decode(),
+            "changed": base64.b64encode(secrets.token_bytes(32)).decode(),
+        }
+        settings.LOCAL_KEY_FILE.write_text(contents[root_state])
+    assert not document_service.ready()
+    assert compose(staff_client).status_code == 503
+    crypto._local_key.cache_clear()
+
+
+def test_local_readiness_checks_active_key_material(staff_client):
+    from backend.apps.core.models import WrappingKeyVersion
+
+    assert compose(staff_client).status_code == 201
+    WrappingKeyVersion.objects.filter(state="active").update(private_ciphertext="{}")
+    assert not document_service.ready()
+
+
+def test_local_protector_never_ready_outside_synthetic(settings):
+    settings.KEY_PROTECTOR = "local-development"
+    settings.SYNTHETIC_MODE = False
+    assert not document_service.ready()
+
+
+def test_remote_protector_does_not_fall_back_to_local_keys(settings, monkeypatch):
+    settings.KEY_PROTECTOR = "key-service"
+    remote = Mock()
+    remote.return_value.call.return_value = {"sealed": True, "suite": SUITE}
+    monkeypatch.setattr(document_service, "pooled_client", remote)
+    assert not document_service.ready()
+    remote.return_value.call.assert_called_once_with("status")

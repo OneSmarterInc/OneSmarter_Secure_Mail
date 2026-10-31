@@ -119,3 +119,8 @@ The standalone HTTPS key-custody page provides dedicated sign-in, status, Unseal
 ### Operations and integration drills
 
 [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) documents archive verification/projection recovery, ClamAV setup, PostgreSQL concurrency/restore checks, operational probes, safe staged-upload cleanup, accessibility verification and the saved Private Email SMTP profile. Live-service evidence remains separate from local checks.
+
+
+### Synthetic preview readiness
+
+The local-development protector checks the actual local root file and existing active wrapping-key material; it does not require KEY_STATUS_URL or a key-service container. Initial synthetic wrapping keys are provisioned by encryption on first use. The production key-service protector still requires a reachable, unsealed remote service and never falls back to local keys. CI runs `scripts/check_compose_browser.py` against `deploy/compose.ci.yaml` with empty remote URLs, asserts readiness, and exercises the browser compose/OTP/upload/reply/download flow. Docker is required to reproduce that CI check; a local unit-test pass is not proof that the stack ran.

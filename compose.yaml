@@ -12,6 +12,8 @@ x-app: &app
     TRUSTED_PROXY_IPS: "127.0.0.1"
     PUBLIC_URL: http://localhost:8080
     CSRF_TRUSTED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+    KEY_PROTECTOR: local-development
+    KEY_STATUS_URL: ""
     MAIL_PROVIDER: development
     SCAN_PROVIDER: clamav
     CLAMAV_TRANSPORT: unix

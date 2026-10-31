@@ -220,7 +220,7 @@ class KeyStore:
             expected_seq += 1
 
     @staticmethod
-    def _audit(db, actor: str, operation: str, org: str = "", ident: str = ""):
+    def _audit(db, actor: str, operation: str, org: str = "", ident: str = "", *, details=None):
         previous = db.execute("SELECT digest FROM audit ORDER BY seq DESC LIMIT 1").fetchone()
         body = p.canonical(
             {
@@ -230,6 +230,7 @@ class KeyStore:
                 "organization": org,
                 "key_id": ident,
                 "previous": previous[0] if previous else "0" * 64,
+                **({"details": details} if details is not None else {}),
             }
         ).decode()
         db.execute(
@@ -454,7 +455,17 @@ class KeyStore:
                 if not isinstance(item, dict) or set(item) != {"context", "wrapper"}:
                     raise ValueError("Invalid batch item")
                 results.append(self._unwrap(db, org, item["context"], item["wrapper"]))
-            self._audit(db, actor, "unwrap_batch", org, str(len(items)))
+            self._audit(
+                db,
+                actor,
+                "unwrap_batch",
+                org,
+                details={
+                    "count": len(items),
+                    "key_ids": sorted({item["wrapper"]["key_id"] for item in items}),
+                    "request_sha256": hashlib.sha256(p.canonical(items)).hexdigest(),
+                },
+            )
             return results
 
     def rewrap(self, org: str, context: str, wrapper: dict, expected: str, actor: str) -> dict:

@@ -169,3 +169,13 @@ New uploaded files require both a source document HTTPS URL and an original down
 ## Compact portal design — 31 October 2026
 
 Refined the shared design across staff and recipient pages: stable desktop sidebar, tighter cards and tables, responsive expiry controls, accurate breadcrumbs, accessible selected navigation/filter states, clearer filtered empty states, expandable connection diagnostics and attachment provenance. SMTP password storage remains encrypted with remote key custody; closed SMTP connections release the password reference. Browser review covers eight staff screens plus sign-in and recipient entry at 1440 and 360 px, with automated accessibility scans on desktop. UI fixtures are synthetic; these checks do not establish live SMTP delivery or a production security certification.
+
+
+## Recipient access policy update — 2026-10-31
+
+This supersedes earlier 1/7/30-day conversation/link expiry requirements. Recipient invitation links do not expire automatically. Existing conversation deadlines are retained only as historical data and are not enforced. New conversation records use a null deadline. Continued direct/group chats preserve old invitation token hashes; new messages do not invalidate existing stored links. All links require mailbox OTP verification and remain subject to grant/conversation revocation and active-owner checks. OTP expiry, recipient idle timeout and absolute session lifetime remain enforced. The compose expiry selector is removed; access details say Until revoked. Older clients may send expiry_days for compatibility, but it does not impose a deadline. Previously deleted token hashes cannot be reconstructed; those recipients need an available invitation.
+
+
+## Recipient reply routing update — 2026-10-31
+
+Recipient private replies always go to the assigned staff owner, even when the selected message was authored by another recipient. They are visible only to that replying recipient and the owner, including attachments; the owner receives a notification. Reply all remains shared with eligible To/Cc recipients and visible to the owner. BCC private copies cannot reply all. Staff can still reply privately to a recipient. Historical recipient-to-recipient private messages are now visible to the assigned owner for review; administrator status alone does not grant content access. Submission audit metadata records reply mode and whether a recipient reply is private to the owner. This supersedes earlier recipient-to-recipient private reply behavior.

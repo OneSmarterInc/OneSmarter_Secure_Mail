@@ -65,7 +65,7 @@ test("recipient chat matches staff layout and preserves collapsed drafts", async
   );
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page
-    .getByRole("button", { name: "Reply to sender", exact: true })
+    .getByRole("button", { name: "Reply to staff", exact: true })
     .first()
     .click();
   await expect(page.getByLabel("Reply mode")).toHaveValue("sender");

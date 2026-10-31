@@ -350,3 +350,13 @@ New uploaded files require both a source document HTTPS URL and an original down
 ## Unified conversation entry — 31 October 2026
 
 One New conversation action replaces the separate message and information-request actions. The single form accepts optional subject/message for protected invitations, files, To/Cc/Bcc and an access deadline. Default payload uses the existing secure_request contract; authorized Nophi explicitly selects ordinary mode with its required subject/content and acknowledgement. Existing /request links remain a compatible alias to the same composer. Existing protected conversations cannot be downgraded. Page headers omit redundant category labels; conversation headers combine navigation, title/date and delivery status.
+
+
+## Recipient access policy update — 2026-10-31
+
+This supersedes earlier 1/7/30-day conversation/link expiry requirements. Recipient invitation links do not expire automatically. Existing conversation deadlines are retained only as historical data and are not enforced. New conversation records use a null deadline. Continued direct/group chats preserve old invitation token hashes; new messages do not invalidate existing stored links. All links require mailbox OTP verification and remain subject to grant/conversation revocation and active-owner checks. OTP expiry, recipient idle timeout and absolute session lifetime remain enforced. The compose expiry selector is removed; access details say Until revoked. Older clients may send expiry_days for compatibility, but it does not impose a deadline. Previously deleted token hashes cannot be reconstructed; those recipients need an available invitation.
+
+
+## Recipient reply routing update — 2026-10-31
+
+Recipient private replies always go to the assigned staff owner, even when the selected message was authored by another recipient. They are visible only to that replying recipient and the owner, including attachments; the owner receives a notification. Reply all remains shared with eligible To/Cc recipients and visible to the owner. BCC private copies cannot reply all. Staff can still reply privately to a recipient. Historical recipient-to-recipient private messages are now visible to the assigned owner for review; administrator status alone does not grant content access. Submission audit metadata records reply mode and whether a recipient reply is private to the owner. This supersedes earlier recipient-to-recipient private reply behavior.

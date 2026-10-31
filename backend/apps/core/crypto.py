@@ -154,10 +154,13 @@ def decrypt_many(values: list[tuple[str, str]]) -> list[bytes]:
     """Request-local bulk decryption; no plaintext or DEK survives this request."""
     if settings.KEY_PROTECTOR != "key-service":
         return [decrypt(value, context) for value, context in values]
+    # This cache exists only for this bulk call, never across HTTP requests.
+    # Include both the authenticated context and full ciphertext in the identity.
+    unique = list(dict.fromkeys(values))
     results = []
     try:
-        for offset in range(0, len(values), 25):
-            batch = values[offset : offset + 25]
+        for offset in range(0, len(unique), 25):
+            batch = unique[offset : offset + 25]
             orgs = {str(organization(context)) for _, context in batch}
             if len(orgs) != 1:
                 raise ValueError("Batch must have a single organization")
@@ -179,7 +182,8 @@ def decrypt_many(values: list[tuple[str, str]]) -> list[bytes]:
                         unb64(envelope["nonce"]), unb64(envelope["data"]), context.encode()
                     )
                 )
-        return results
+        decoded = dict(zip(unique, results, strict=True))
+        return [decoded[item] for item in values]
     except ERRORS as exc:
         raise CryptoUnavailable("Protected content could not be verified.") from exc
 

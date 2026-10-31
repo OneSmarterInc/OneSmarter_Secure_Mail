@@ -119,11 +119,11 @@ REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "backend.apps.core.http.exception_handler",
 }
 DATA_UPLOAD_MAX_MEMORY_SIZE = 27 * 1024 * 1024
-FILE_UPLOAD_MAX_MEMORY_SIZE = 26 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = DATA_UPLOAD_MAX_MEMORY_SIZE
+FILE_UPLOAD_HANDLERS = ["backend.apps.core.upload_handlers.BoundedMemoryUploadHandler"]
 SETUP_TOKEN_SHA256 = os.environ.get("SETUP_TOKEN_SHA256", "")
 DEV_INBOX_TOKEN_SHA256 = os.environ.get("DEV_INBOX_TOKEN_SHA256", "")
 STAGED_UPLOAD_QUOTA_BYTES = int(os.environ.get("STAGED_UPLOAD_QUOTA_BYTES", str(100 * 1024 * 1024)))
-FILE_UPLOAD_MAX_MEMORY_SIZE = 1024 * 1024
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_FILES = 10
@@ -225,3 +225,6 @@ EVIDENCE_DIRECTORY = Path(os.environ.get("EVIDENCE_DIRECTORY", str(RUNTIME_DIR /
 EVIDENCE_TSA_URL = os.environ.get("EVIDENCE_TSA_URL", "")
 EVIDENCE_TSA_CA_FILE = os.environ.get("EVIDENCE_TSA_CA_FILE", "")
 EVIDENCE_OPENSSL = os.environ.get("EVIDENCE_OPENSSL", "openssl")
+
+# Dedicated stable secret in deployment; changing it requires rebuilding the word index.
+SEARCH_INDEX_KEY = os.environ.get("SEARCH_INDEX_KEY", SECRET_KEY if SYNTHETIC_MODE else "")

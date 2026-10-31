@@ -18,7 +18,7 @@ from django.conf import settings
 from django.db import transaction
 
 from backend.keyservice import protocol
-from backend.keyservice.client import Client
+from backend.keyservice.client import ClientPool, pooled_client
 
 from .models import IdempotencyRecord, WrappingKeyVersion
 
@@ -212,8 +212,8 @@ def get_key(org, ident) -> WrappingKeyVersion:
     )
 
 
-def service() -> Client:
-    return Client(
+def service() -> ClientPool:
+    return pooled_client(
         settings.KEY_SERVICE_URL,
         settings.KEY_SERVICE_CA,
         settings.KEY_SERVICE_CERT,

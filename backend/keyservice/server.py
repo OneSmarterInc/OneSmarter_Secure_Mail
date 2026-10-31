@@ -226,6 +226,7 @@ class Service:
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     server_version = "OneSmarterKeyService"
     sys_version = ""
 
@@ -235,7 +236,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def response(self, status: int, value, *, content_type="application/json", cookie=None):
         payload = p.canonical(value) if content_type == "application/json" else value
+        # Rejected requests may have an unread body: never parse it as a next request.
+        if status != 200:
+            self.close_connection = True
         self.send_response(status)
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
@@ -260,14 +266,28 @@ class Handler(BaseHTTPRequestHandler):
         service = self.server.service
         # Revoked/unlisted identities must never consume authorized workloads' budget.
         identity = service.identity(fp)
-        # Bulk search/list traffic has its own budget and cannot exhaust unwrap,
-        # login or custodial operations through the shared workload certificate.
-        if self.path == "/v1/unwrap-batch":
-            service.throttle("bulk:" + fp, 120)
-        else:
-            # A peer rejected at its own cap must not consume shared capacity.
-            service.throttle("peer:" + fp, 600)
-            service.throttle("all-peers", 3000)
+        # Separate custody capacity from workload traffic. Policy limits are
+        # operator-controlled, never supplied by an API caller.
+        custody = identity.get("role") == "custodian"
+        bulk = self.path == "/v1/unwrap-batch"
+        category = "custody" if custody else "bulk" if bulk else "workload"
+        default_limit = 600 if custody else 3000 if bulk else 6000
+        limit = identity.get("rate_limits", {}).get(category, default_limit)
+        if type(limit) is not int or not 1 <= limit <= default_limit:
+            raise PermissionError("Invalid identity rate policy.")
+        with service.lock:
+            # Preflight both limits before charging either bucket.
+            now = time.monotonic()
+            keys = (
+                ("traffic:" + category + ":" + fp, limit),
+                ("global:" + category, default_limit),
+            )
+            for key, cap in keys:
+                start, count = service.rates.get(key, (now, 0))
+                if now - start < 60 and count >= cap:
+                    raise PermissionError("Rate limit exceeded.")
+            for key, cap in keys:
+                service.throttle(key, cap)
         return fp, identity
 
     def do_GET(self):
@@ -387,6 +407,9 @@ class Server(ThreadingMixIn, HTTPServer):
         self.require_pq = require_pq
         transport_tls.configure(tls, required=require_pq)
         self.slots = threading.BoundedSemaphore(16)
+        self.authenticated_slots = threading.BoundedSemaphore(64)
+        self.custodian_slots = threading.BoundedSemaphore(8)
+        self.denied_slots = threading.BoundedSemaphore(4)
         self.connection_lock = threading.Lock()
         self.connections_by_ip: dict[str, int] = {}
         self.handshake_deadline_seconds = 2.0
@@ -460,17 +483,40 @@ class Server(ThreadingMixIn, HTTPServer):
 
     def process_request_thread(self, request, client_address):
         original_address, peer, deadline = client_address
+        handshake_admitted = True
+        authenticated = False
         try:
             request = self.tls.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
             self.handshake(request, deadline)
             transport_tls.verify(request, required=self.require_pq)
-            request.settimeout(10)
+            # Idle authenticated connections must not hold pre-TLS admission slots.
+            cert = request.getpeercert(binary_form=True)
+            try:
+                identity = self.service.identity(hashlib.sha256(cert).hexdigest())
+            except PermissionError:
+                identity = None
+            slots = (
+                self.denied_slots
+                if identity is None
+                else self.custodian_slots
+                if identity.get("role") == "custodian"
+                else self.authenticated_slots
+            )
+            self.release_connection(peer)
+            handshake_admitted = False
+            authenticated = slots.acquire(blocking=False)
+            if not authenticated:
+                return
+            request.settimeout(2)
             super().process_request_thread(request, original_address)
-        except (OSError, ssl.SSLError):
+        except (OSError, ssl.SSLError, PermissionError, ValueError):
             request.close()
         finally:
             request.close()
-            self.release_connection(peer)
+            if handshake_admitted:
+                self.release_connection(peer)
+            if authenticated:
+                slots.release()
 
 
 def tls_context(cert: str, key: str, ca: str) -> ssl.SSLContext:

@@ -20,10 +20,8 @@ x-app: &app
     ENABLE_DEV_TOOLS: 'true'
     SETUP_TOKEN_SHA256: ${SETUP_TOKEN_SHA256:?}
     DEV_INBOX_TOKEN_SHA256: ${DEV_INBOX_TOKEN_SHA256:?}
-    KEY_STATUS_URL: https://keyservice:8443
-    KEY_STATUS_CA: /app/.runtime/ci-status/cert.pem
-    KEY_STATUS_CERT: /app/.runtime/ci-status/cert.pem
-    KEY_STATUS_KEY: /app/.runtime/ci-status/key.pem
+    KEY_STATUS_URL: ''
+    KEY_SERVICE_URL: ''
   volumes: [runtime:/app/.runtime]
 services:
   db:
@@ -49,21 +47,11 @@ services:
     command: [sh, -c, 'python scripts/init_local.py && python manage.py migrate --noinput']
     depends_on:
       db: {condition: service_healthy}
-  keyservice:
-    <<: *app
-    command: [python, scripts/ci_keyservice.py]
-    depends_on:
-      init: {condition: service_completed_successfully}
-    healthcheck:
-      test: [CMD, python, -c, "from backend.keyservice.client import Client; p='/app/.runtime/ci-status/'; assert Client('https://localhost:8443',p+'cert.pem',p+'cert.pem',p+'key.pem').call('status')['sealed'] is False"]
-      interval: 3s
-      timeout: 5s
-      retries: 30
   api:
     <<: *app
     ports: ['127.0.0.1:8080:8080']
     depends_on:
-      keyservice: {condition: service_healthy}
+      init: {condition: service_completed_successfully}
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
       interval: 3s
@@ -84,13 +72,13 @@ services:
     <<: *app
     command: [celery, -A, backend.config.celery, worker, --loglevel=WARNING, --concurrency=2]
     depends_on:
-      keyservice: {condition: service_healthy}
+      init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
   beat:
     <<: *app
     command: [celery, -A, backend.config.celery, beat, --loglevel=WARNING, --schedule=/app/.runtime/celerybeat]
     depends_on:
-      keyservice: {condition: service_healthy}
+      init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
 volumes:
   runtime:

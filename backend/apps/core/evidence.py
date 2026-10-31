@@ -299,10 +299,60 @@ def document_table(request, page):
     field = ordering.removeprefix("-")
     if field not in {"filename", "conversation", "sender", "uploaded_at", "download"}:
         raise Problem("Invalid document sort column.")
+    from django.db.models import CharField, F, Q, Value
+    from django.db.models.functions import Coalesce, Lower, NullIf
+
+    from . import search_index
+    from .services import rate_limit
+
+    rate_limit(request, "document_table", str(request.user.pk), maximum=60, seconds=60)
+    query = authorized_attachments(request.user)
+    search = request.query_params.get("q", "").strip()
+    if len(search) > 200:
+        raise Problem("Search is limited to 200 characters.")
+    if search:
+        if query.filter(
+            Q(search_indexed=False) | Q(message__conversation__search_indexed=False)
+        ).exists():
+            raise Problem(
+                "Document search index needs rebuilding.", "search_index_unavailable", 503
+            )
+        for word in search_index.words(search):
+            query = query.filter(
+                Q(pk__in=search_index.ids(request.user.organization_id, "filename", word))
+                | Q(
+                    message__conversation_id__in=search_index.ids(
+                        request.user.organization_id, "subject", word
+                    )
+                )
+                | Q(message__staff__email__icontains=word)
+                | Q(message__staff__display_name__icontains=word)
+                | Q(message__grant__email__icontains=word)
+                | Q(created_at__icontains=word)
+            )
+    # HMAC values cannot preserve alphabetical order. Only native metadata sorts
+    # are offered, with a stable id tie-breaker before any remote decryption.
+    if field not in {"uploaded_at", "sender"}:
+        raise Problem("Sort documents by date or sender.")
+    query = query.annotate(
+        sender_sort=Lower(
+            Coalesce(
+                NullIf(F("message__staff__display_name"), Value("")),
+                F("message__staff__email"),
+                F("message__grant__email"),
+                Value(""),
+                output_field=CharField(),
+            )
+        )
+    )
+    sort = ("-" if ordering.startswith("-") else "") + (
+        "created_at" if field == "uploaded_at" else "sender_sort"
+    )
+    count = query.count()
     attachments = list(
-        authorized_attachments(request.user)
-        .select_related("message__conversation", "message__staff", "message__grant")
-        .order_by("pk")
+        query.select_related("message__conversation", "message__staff", "message__grant").order_by(
+            sort, "pk"
+        )[(page - 1) * 25 : page * 25]
     )
     conversations = {
         item.message.conversation_id: item.message.conversation for item in attachments
@@ -341,34 +391,7 @@ def document_table(request, page):
                 "uploaded_at": attachment.created_at.isoformat(),
             }
         )
-    search = request.query_params.get("q", "").strip().casefold()
-    if len(search) > 200:
-        raise Problem("Search is limited to 200 characters.")
-    if search:
-        terms = search.split()
-        rows = [
-            row
-            for row in rows
-            if all(
-                term
-                in " ".join(
-                    str(row[name])
-                    for name in (
-                        "filename",
-                        "conversation",
-                        "sender",
-                        "sender_email",
-                        "uploaded_at",
-                    )
-                ).casefold()
-                for term in terms
-            )
-        ]
-    key = "filename" if field == "download" else field
-    rows.sort(key=lambda row: row[key].casefold(), reverse=ordering.startswith("-"))
-    return Response(
-        {"results": rows[(page - 1) * 25 : page * 25], "count": len(rows), "page": page}
-    )
+    return Response({"results": rows, "count": count, "page": page})
 
 
 @endpoint(["GET"], staff=True)

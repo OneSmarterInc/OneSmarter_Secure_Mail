@@ -189,17 +189,8 @@ test("staff request → recipient upload → staff read; accounts and immutable 
   ).toBeVisible();
   const fileText =
     "Fictional application for Sara. This document contains no real confidential data.";
-  await sara
-    .getByText("Document source details (required for attachments)", {
-      exact: true,
-    })
-    .click();
-  await sara
-    .getByLabel("Source document URL")
-    .fill("https://example.com/test.txt");
-  await sara
-    .getByLabel("Original download time (your local time)")
-    .fill("2026-01-01T12:00");
+  await sara.getByRole("button", { name: "New message", exact: true }).click();
+  await sara.getByRole("button", { name: "Attach files", exact: true }).click();
   await sara.getByLabel("Upload attachments").setInputFiles({
     name: "sara-application.txt",
     mimeType: "text/plain",
@@ -230,7 +221,9 @@ test("staff request → recipient upload → staff read; accounts and immutable 
     }),
   ).toBeVisible();
   const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("link", { name: /sara-application.txt/ }).click();
+  await page
+    .getByRole("button", { name: "Download sara-application.txt", exact: true })
+    .click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe("sara-application.txt");
   const stream = await download.createReadStream();

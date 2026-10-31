@@ -298,6 +298,7 @@ def test_peer_throttle_rejections_preserve_global_custodian_capacity(tmp_path, m
                     hashlib.sha256(cert).hexdigest(): {
                         "name": name,
                         "role": name,
+                        "rate_limits": {"workload": 600},
                         "expires_at": 9999999999,
                     }
                     for name, cert in certificates.items()
@@ -317,7 +318,7 @@ def test_peer_throttle_rejections_preserve_global_custodian_capacity(tmp_path, m
 
     for _ in range(600):
         peer("workload", "/v1/unwrap")
-    assert service.rates["all-peers"][1] == 600
+    assert service.rates["global:workload"][1] == 600
 
     def rejected(_):
         with pytest.raises(PermissionError, match="Rate limit exceeded"):
@@ -325,18 +326,18 @@ def test_peer_throttle_rejections_preserve_global_custodian_capacity(tmp_path, m
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(rejected, range(3100)))
-    assert service.rates["all-peers"][1] == 600
+    assert service.rates["global:workload"][1] == 600
     for path in ("/v1/login", "/v1/unseal"):
         assert peer("custodian", path)[1]["role"] == "custodian"
-    assert service.rates["all-peers"][1] == 602
+    assert service.rates["global:custody"][1] == 2
     # The shared ceiling still rejects admitted peers when genuinely full.
-    service.rates["all-peers"] = (now, 3000)
+    service.rates["global:custody"] = (now, 600)
     with pytest.raises(PermissionError, match="Rate limit exceeded"):
         peer("custodian", "/v1/unseal")
-    assert service.rates["all-peers"][1] == 3000
+    assert service.rates["global:custody"][1] == 600
     now += 60
     peer("workload", "/v1/unwrap")
-    assert service.rates["all-peers"][1] == 1
+    assert service.rates["global:workload"][1] == 1
 
 
 def test_denial_final_window_retains_identity(tmp_path):

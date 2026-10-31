@@ -1,5 +1,4 @@
 import json
-from datetime import timedelta
 
 import pytest
 from django.test import Client
@@ -72,7 +71,7 @@ def test_legacy_recipient_api_disabled_by_default(settings):
     assert Client().get("/recipient-api/auth/session").status_code == 200
 
 
-@pytest.mark.parametrize("restriction", ["grant", "conversation", "expiry", "owner"])
+@pytest.mark.parametrize("restriction", ["grant", "conversation", "owner"])
 def test_original_invite_survives_replies_but_not_access_revocation(staff_client, restriction):
     created = compose(staff_client)
     conversation = Conversation.objects.get(pk=created.json()["id"])
@@ -128,9 +127,6 @@ def test_original_invite_survives_replies_but_not_access_revocation(staff_client
     elif restriction == "conversation":
         conversation.revoked_at = timezone.now()
         conversation.save(update_fields=["revoked_at"])
-    elif restriction == "expiry":
-        conversation.expires_at = timezone.now() - timedelta(seconds=1)
-        conversation.save(update_fields=["expires_at"])
     else:
         conversation.owner.status = "deactivated"
         conversation.owner.save(update_fields=["status"])

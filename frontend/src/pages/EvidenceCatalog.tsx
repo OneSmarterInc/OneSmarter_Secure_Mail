@@ -93,7 +93,7 @@ export function EvidenceCatalog() {
               type="search"
               aria-label="Search all documents"
               maxLength={200}
-              placeholder="Search documents, conversations, senders or dates"
+              placeholder="Search by words in documents, conversations, senders or dates"
               value={search}
               onChange={(event) => {
                 setSearch(event.target.value);
@@ -131,15 +131,21 @@ export function EvidenceCatalog() {
                   ["sender", "Sender"],
                   ["uploaded_at", "Date / time"],
                   ["download", "Download"],
-                ].map(([field, label]) => (
-                  <SortHeader
-                    key={field}
-                    label={label}
-                    field={field}
-                    sort={sort}
-                    onSort={changeSort}
-                  />
-                ))}
+                ].map(([field, label]) =>
+                  field !== "sender" && field !== "uploaded_at" ? (
+                    <th key={field} scope="col">
+                      {label}
+                    </th>
+                  ) : (
+                    <SortHeader
+                      key={field}
+                      label={label}
+                      field={field}
+                      sort={sort}
+                      onSort={changeSort}
+                    />
+                  ),
+                )}
               </tr>
             </thead>
             <tbody>

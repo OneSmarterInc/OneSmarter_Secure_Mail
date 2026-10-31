@@ -691,3 +691,118 @@ def test_custody_migration_rejects_corruption_before_remote_mutation(org):
     workload.call.assert_not_called()
     user.refresh_from_db()
     assert json.loads(user.mfa_secret) == original
+
+
+def test_persistent_connection_checks_seal_and_revocation(live_service):
+    from backend.keyservice.client import ServiceUnavailable, pooled_client
+
+    live = live_service
+    cert, key, fingerprint = live["certs"]["workload"]
+    runtime = pooled_client(
+        live["origin"], str(live["certs"]["ca"]), str(cert), str(key), require_pq=live["require_pq"]
+    )
+    try:
+        assert runtime.call("status")["sealed"]
+        lease = runtime.clients.get_nowait()
+        connection = lease.connection
+        runtime.clients.put(lease)
+        assert connection is not None
+        assert runtime.call("status")["sealed"]
+        lease = runtime.clients.get_nowait()
+        assert lease.connection is connection
+        runtime.clients.put(lease)
+        live["store"].unseal(live["secret"], "test")
+        assert not runtime.call("status")["sealed"]
+        live["store"].seal("test")
+        assert runtime.call("status")["sealed"]
+        policy = json.loads(live["policy"].read_text())
+        del policy["identities"][fingerprint]
+        live["policy"].write_text(json.dumps(policy))
+        with pytest.raises(ServiceUnavailable):
+            runtime.call("status")
+    finally:
+        runtime.close()
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_KEY_SERVICE_LOAD") != "1", reason="Explicit component load drill"
+)
+def test_key_service_load_gate(live_service):
+    """Synthetic component gate: 50 staff opens and 500 recipient opens, 50 in flight."""
+    from backend.keyservice.client import pooled_client
+
+    live = live_service
+    store = live["store"]
+    store.unseal(live["secret"], "load-test")
+    version = store.rotate(live["org"], None, str(uuid.uuid4()), "load-test")
+    items = []
+    expected = []
+    for i in range(61):
+        context = f"secure-mail:v1:organization={live['org']}:load={i}"
+        dek = secrets.token_bytes(32)
+        wrapper = store.wrap(live["org"], context, dek, version["id"], "load-test")
+        items.append({"context": context, "wrapper": wrapper})
+        expected.append(dek)
+    cert, key, _ = live["certs"]["workload"]
+    runtime = pooled_client(
+        live["origin"],
+        str(live["certs"]["ca"]),
+        str(cert),
+        str(key),
+        require_pq=live["require_pq"],
+        timeout=30,
+    )
+    durations = []
+
+    def opened(index):
+        start = time.perf_counter()
+        offset = 0
+        for size in [25, 25, 11] if index < 50 else [3]:
+            result = runtime.call(
+                "unwrap-batch",
+                organization=live["org"],
+                items=items[offset : offset + size],
+            )
+            assert [p.decode(value, 32) for value in result["deks"]] == expected[
+                offset : offset + size
+            ]
+            offset += size
+        return time.perf_counter() - start
+
+    start = time.perf_counter()
+    try:
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            durations = list(executor.map(opened, range(550)))
+        elapsed = time.perf_counter() - start
+        p95 = sorted(durations)[int(len(durations) * 0.95)]
+        report = {
+            "scope": "synthetic key-service component, not full portal or production",
+            "staff_opens": 50,
+            "recipient_opens": 500,
+            "concurrency": 50,
+            "batch_calls": 650,
+            "staff_envelopes_per_open": 61,
+            "recipient_envelopes_per_open": 3,
+            "seconds": round(elapsed, 3),
+            "p95_seconds": round(p95, 3),
+            "errors": 0,
+            "pq_transport": live["require_pq"],
+        }
+        output = Path(".runtime/key-service-load.json")
+        output.parent.mkdir(exist_ok=True)
+        output.write_text(json.dumps(report, indent=2))
+        assert p95 < 30
+        assert elapsed < 120
+        with store.transaction() as db:
+            store.verify_audit(db)
+        store.seal("load-test")
+        from backend.keyservice.client import ServiceUnavailable
+
+        with pytest.raises(ServiceUnavailable):
+            runtime.call(
+                "unwrap-batch",
+                organization=live["org"],
+                items=items[:1],
+            )
+    finally:
+        runtime.close()

@@ -3,6 +3,7 @@ import logging
 import traceback
 from functools import wraps
 
+from django.core.exceptions import RequestDataTooBig
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import Http404
 from rest_framework.authentication import SessionAuthentication
@@ -23,6 +24,11 @@ class Problem(APIException):
 
 
 def exception_handler(exc, context):
+    if isinstance(exc, RequestDataTooBig):
+        return Response(
+            {"error": {"code": "upload_too_large", "message": "Upload size limit exceeded."}},
+            status=413,
+        )
     if isinstance(exc, CryptoUnavailable):
         return Response(
             {

@@ -58,11 +58,7 @@ def process_job(job_id, *, service_ready=None):
             job.error_code = "actor_unavailable"
             job.save()
             return
-        if job.conversation and (
-            job.conversation.revoked_at
-            or job.conversation.expires_at <= timezone.now()
-            and job.conversation.protected
-        ):
+        if job.conversation and job.conversation.revoked_at:
             job.state = "cancelled"
             job.save()
             return

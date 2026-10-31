@@ -73,23 +73,15 @@ test("document table sorts and downloads original files", async ({ page }) => {
       iconBox!.y + iconBox!.height / 2 - inputBox!.y - inputBox!.height / 2,
     ),
   ).toBeLessThan(1);
-  for (const label of [
-    "Document name",
-    "Conversation",
-    "Sender",
-    "Date / time",
-    "Download",
-  ]) {
+  for (const label of ["Sender", "Date / time"]) {
     await expect(
       page.getByRole("button", { name: new RegExp(`Sort ${label} `) }),
     ).toBeVisible();
   }
   const before = await page.getByRole("table").boundingBox();
   hold = true;
-  await page
-    .getByRole("button", { name: "Sort Document name ascending" })
-    .click();
-  await expect.poll(() => sort).toBe("filename");
+  await page.getByRole("button", { name: "Sort Sender ascending" }).click();
+  await expect.poll(() => sort).toBe("sender");
   await expect(
     page.getByRole("cell", { name: "report.txt", exact: true }),
   ).toBeVisible();

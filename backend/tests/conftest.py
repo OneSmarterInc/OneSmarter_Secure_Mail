@@ -6,15 +6,12 @@ import time
 import pytest
 from django.test import Client
 
-from backend.apps.core import crypto, document_service
+from backend.apps.core import crypto
 from backend.apps.core.models import Organization, StaffUser
-from backend.keyservice.protocol import SUITE
 
 
 @pytest.fixture(autouse=True)
 def isolated_storage(settings, tmp_path, monkeypatch):
-    # Unit flows use a ready service fixture; admission tests override this response.
-    monkeypatch.setattr(document_service, "read_status", lambda: {"sealed": False, "suite": SUITE})
     settings.TRUSTED_PROXY_IPS = set()
     settings.TRUSTED_PROXY_UNIX_SOCKET = False
     settings.RUNTIME_DIR = tmp_path

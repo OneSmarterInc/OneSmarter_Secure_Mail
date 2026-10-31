@@ -272,8 +272,8 @@ export function Recipient({ token }: { token: string }) {
             </span>
             <h1>This message is unavailable</h1>
             <p>
-              Access may have expired or been revoked, or the link may be
-              invalid. Contact the sender if needed.
+              Access may have been revoked, or the link may be invalid. Contact
+              the sender if needed.
             </p>
           </div>
         ) : conversation ? (
@@ -324,7 +324,7 @@ export function Recipient({ token }: { token: string }) {
                   onDraftChange={setDraft}
                   onSent={() => void refresh()}
                 />
-                <ThreadContent conversation={conversation} />
+                <ThreadContent conversation={conversation} recipientMode />
               </div>
             </div>
           </>

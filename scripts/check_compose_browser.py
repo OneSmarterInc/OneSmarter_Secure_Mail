@@ -83,6 +83,21 @@ def main():
             ]
         )
         run(compose + ["up", "--detach", "--wait", "--wait-timeout", "180"])
+        # Prove the shipped local protector works without a remote status helper.
+        run(
+            compose
+            + [
+                "exec",
+                "-T",
+                "api",
+                "python",
+                "-c",
+                "import os,json,urllib.request; "
+                "assert os.environ['KEY_PROTECTOR']=='local-development'; "
+                "assert not os.environ.get('KEY_STATUS_URL'); "
+                "assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/document-service'))['ready'] is True",
+            ]
+        )
         # Confirm notification worker is alive before browser sends requests.
         run(
             compose
