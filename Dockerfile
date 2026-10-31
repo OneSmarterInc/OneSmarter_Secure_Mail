@@ -4,6 +4,8 @@ WORKDIR /app
 COPY requirements.lock .
 RUN apk add --no-cache openssl libstdc++
 RUN pip install --no-cache-dir -r requirements.lock && adduser -D -u 1000 app
+# Runtime images do not install packages; remove pip and its bundled dependencies.
+RUN pip uninstall -y pip && python -c "import ensurepip, pathlib, shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)"
 COPY --chown=app:app backend ./backend
 COPY --chown=app:app secure_mail ./secure_mail
 COPY --chown=app:app scripts ./scripts

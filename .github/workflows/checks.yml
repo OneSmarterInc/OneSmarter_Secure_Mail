@@ -13,11 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build verified PQ runtime (Python and OpenSSL together)
-        run: docker build -f deploy/Dockerfile.pq -t securemail-pq-test .
+        run: docker build --build-arg INSTALL_TEST_DEPENDENCIES=1 -f deploy/Dockerfile.pq -t securemail-pq-test .
       - name: Test actual hybrid TLS and key-service load
         run: |
           docker run --rm --user root -v "$PWD:/app" -e APP_ENV -e RUN_PQ_TRANSPORT -e RUN_KEY_SERVICE_LOAD securemail-pq-test sh -ec '
-            pip install -r requirements-test.lock
             python scripts/init_local.py
             python scripts/check_pq_transport.py
             pytest backend/tests/test_keyservice.py backend/tests/test_pq_transport.py -q

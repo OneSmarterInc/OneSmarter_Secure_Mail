@@ -3574,7 +3574,7 @@ dialog:has(.conversation-actions-grid) .modal-heading {
 }
 .recipient-sidebar nav button[aria-current="page"] {
   background: #e5f3f1;
-  color: #007c7c;
+  color: #075f5d;
   font-weight: 600;
 }
 .recipient-sidebar-note {

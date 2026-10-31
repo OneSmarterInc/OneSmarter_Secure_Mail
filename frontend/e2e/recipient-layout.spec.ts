@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 test("recipient chat matches staff layout and preserves collapsed drafts", async ({
   page,
 }) => {
@@ -46,6 +47,13 @@ test("recipient chat matches staff layout and preserves collapsed drafts", async
     return route.fulfill({ json: { ready: true } });
   });
   await page.goto("/recipient/#/conversation");
+  await expect(
+    page.locator('.recipient-sidebar button[aria-current="page"]'),
+  ).toBeVisible();
+  const accessibility = await new AxeBuilder({ page })
+    .include(".recipient-sidebar")
+    .analyze();
+  expect(accessibility.violations).toEqual([]);
   const header = page.locator(".recipient-conversation-header");
   await expect(
     header.getByRole("button", { name: "New message" }),
