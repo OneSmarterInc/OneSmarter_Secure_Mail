@@ -23,6 +23,7 @@ from .services import audit, current_staff, digest, keyed, lock_organization, qu
 
 
 def user_data(user):
+    personal = getattr(user, "staffsmtp", None)
     return {
         "id": user.pk,
         "name": user.display_name,
@@ -31,7 +32,9 @@ def user_data(user):
         "can_nophi": user.can_nophi,
         "can_manage_privileges": user.can_manage_privileges,
         "can_export_audit": user.can_export_audit,
-        "sender_addresses": user.sender_addresses,
+        "sender_addresses": [personal.email]
+        if personal and personal.email in user.sender_addresses
+        else user.sender_addresses,
         "organization": user.organization.name,
         "mfa_confirmed": user.mfa_confirmed,
     }
@@ -102,7 +105,7 @@ def setup(request):
         org, _ = Organization.objects.get_or_create(
             domain=settings.COMPANY_DOMAIN, defaults={"name": "OneSmarter"}
         )
-        Organization.objects.select_for_update().get(pk=org.pk)
+        Organization.objects.select_for_update(no_key=True).get(pk=org.pk)
         if StaffUser.objects.exists():
             raise Problem("Initial setup is already complete.", status=409)
         user = StaffUser.objects.create_user(
@@ -144,12 +147,9 @@ def pending_user(request):
 def sign_in(request):
     data = validate(Credentials, request.data)
     email = data["email"].lower()
-    rate_limit(request, "login", email, maximum=10, identity_budget=False)
+    rate_limit(request, "login", email, maximum=10, seconds=60)
     user = authenticate(request._request, username=email, password=data["password"])
     if user is None or user.status != "active" or not is_company_address(user.email):
-        # Account failure backoff never prevents a correct password from reaching MFA.
-        # Aggregate IP/global admission above bounds password-hashing CPU first.
-        rate_limit(request, "login-failure", email, maximum=10)
         known = StaffUser.objects.filter(email=email).first()
         if known:
             audit(

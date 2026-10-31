@@ -52,6 +52,68 @@ function errorText(value: unknown): string {
     return Object.values(value).map(errorText).join(" ");
   return "The request could not be completed.";
 }
+function responseError(response: Response, body: unknown): never {
+  const error =
+    body && typeof body === "object" && "error" in body ? body.error : body;
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? String(error.code)
+      : "request_failed";
+  const message =
+    error && typeof error === "object" && "message" in error
+      ? error.message
+      : error;
+  if (response.status === 401)
+    window.dispatchEvent(new CustomEvent("session-expired"));
+  throw new ApiError(errorText(message), code, response.status);
+}
+
+export async function downloadAttachment(
+  id: string,
+  name: string,
+  signal: AbortSignal,
+) {
+  return downloadResource(
+    `/attachments/${encodeURIComponent(id)}`,
+    name,
+    signal,
+  );
+}
+
+export async function downloadResource(
+  path: string,
+  name: string,
+  signal: AbortSignal,
+) {
+  const response = await fetch(`${apiBase}${path}`, {
+    credentials: "same-origin",
+    cache: "no-store",
+    redirect: "error",
+    signal,
+  });
+  if (!response.ok)
+    responseError(response, await response.json().catch(() => null));
+  const blob = await response.blob();
+  if (signal.aborted) return;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download =
+    name
+      .split(/[\\/]/)
+      .pop()
+      ?.replace(/[\u0000-\u001f\u007f]/g, "")
+      .slice(0, 200) || "document";
+  document.body.appendChild(link);
+  try {
+    link.click();
+  } finally {
+    link.remove();
+    // Allow the browser to consume the download before releasing blob memory.
+    window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit = {},
@@ -74,21 +136,7 @@ export async function api<T>(
     cache: "no-store",
   });
   const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const error =
-      body && typeof body === "object" && "error" in body ? body.error : body;
-    const code =
-      error && typeof error === "object" && "code" in error
-        ? String(error.code)
-        : "request_failed";
-    const message =
-      error && typeof error === "object" && "message" in error
-        ? error.message
-        : error;
-    if (response.status === 401)
-      window.dispatchEvent(new CustomEvent("session-expired"));
-    throw new ApiError(errorText(message), code, response.status);
-  }
+  if (!response.ok) responseError(response, body);
   if (
     body &&
     typeof body === "object" &&
@@ -109,34 +157,50 @@ export function post<T>(
     headers: key ? { "Idempotency-Key": key } : undefined,
   });
 }
-export function useResource<T>(path: string | null, refresh = 0) {
-  const [data, setData] = useState<T | null>(null);
+export function useResource<T>(
+  path: string | null,
+  refresh = 0,
+  retainOnRefresh = false,
+) {
+  const [snapshot, setSnapshot] = useState<{ path: string; data: T } | null>(
+    null,
+  );
+  // Never render a previous resource's data after navigation.
+  const data = snapshot?.path === path ? snapshot.data : null;
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     if (!path) {
+      setSnapshot(null);
+      setError("");
       setLoading(false);
       return;
     }
     const controller = new AbortController();
     setLoading(true);
     setError("");
-    setData(null);
+    if (!retainOnRefresh) setSnapshot(null);
     api<T>(path, { signal: controller.signal })
       .then((value) => {
-        if (!controller.signal.aborted) setData(value);
+        if (!controller.signal.aborted) setSnapshot({ path, data: value });
       })
       .catch((reason: unknown) => {
-        if (!controller.signal.aborted)
+        if (!controller.signal.aborted) {
+          if (
+            reason instanceof ApiError &&
+            [401, 403, 404].includes(reason.status)
+          )
+            setSnapshot(null);
           setError(
             errorText(reason instanceof Error ? reason.message : reason),
           );
+        }
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [path, refresh]);
+  }, [path, refresh, retainOnRefresh]);
   return { data, error, loading };
 }
 export function useDebounced(value: string, delay = 300) {
@@ -175,6 +239,7 @@ export function uploadFile<T>(
   file: File,
   progress: (percent: number) => void,
   signal: AbortSignal,
+  metadata: Record<string, string> = {},
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -239,6 +304,8 @@ export function uploadFile<T>(
     };
     const form = new FormData();
     form.append("file", file);
+    for (const [key, value] of Object.entries(metadata))
+      if (value) form.append(key, value);
     xhr.send(form);
   });
 }

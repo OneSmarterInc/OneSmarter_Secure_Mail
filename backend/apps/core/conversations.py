@@ -23,6 +23,7 @@ from .models import (
     Message,
     OTPChallenge,
     RecipientGrant,
+    RecipientInvitationToken,
     RecipientSession,
 )
 from .services import (
@@ -70,6 +71,8 @@ class Reply(serializers.Serializer):
     body = serializers.CharField(max_length=100000, allow_blank=True, default="")
     attachments = serializers.ListField(child=serializers.UUIDField(), max_length=10, default=list)
     audience = serializers.UUIDField(required=False, allow_null=True)
+    reply_to = serializers.UUIDField(required=False, allow_null=True)
+    reply_mode = serializers.ChoiceField(choices=["sender", "all"], default="sender")
 
     def validate(self, data):
         if not data["body"] and not data["attachments"]:
@@ -141,6 +144,10 @@ def owned(request, ident):
 def attachment_data(attachment):
     return {
         "id": str(attachment.pk),
+        "sha256": attachment.sha256,
+        "capture_id": str(attachment.evidence_capture_id)
+        if attachment.evidence_capture_id
+        else None,
         "name": crypto.decrypt(
             attachment.name_ciphertext,
             crypto.context(attachment.organization_id, "filename", attachment.pk),
@@ -182,6 +189,35 @@ def summary(conversation, subject=None):
     }
 
 
+def visible_messages(query, grant):
+    return query.filter(
+        Q(grant=grant)
+        | Q(shared=True)
+        | Q(staff__isnull=False, audience__isnull=True)
+        | Q(audience=grant)
+    )
+
+
+def staff_visible_messages(query):
+    return query.exclude(grant__isnull=False, audience__isnull=False, shared=False)
+
+
+def safe_headers(message, viewer):
+    header = dict(message.mail_headers)
+    if not header:
+        grants = list(message.conversation.grants.all())
+        header = {
+            "from_name": message.staff.display_name if message.staff else message.grant.email,
+            "from_email": message.conversation.sender if message.staff else message.grant.email,
+            "to": [g.email for g in grants if g.kind == "to"],
+            "cc": [g.email for g in grants if g.kind == "cc"],
+            "bcc": [g.email for g in grants if g.kind == "bcc"],
+        }
+    if viewer:
+        header["bcc"] = [viewer.email] if viewer.email in header.get("bcc", []) else []
+    return header
+
+
 def detail(conversation, grant=None):
     data = (
         summary(conversation)
@@ -202,14 +238,23 @@ def detail(conversation, grant=None):
         .order_by("created_at", "id")
     )
     if grant:
-        messages = messages.filter(
-            Q(grant=grant) | Q(staff__isnull=False, audience__isnull=True) | Q(audience=grant)
-        )
+        messages = visible_messages(messages, grant)
+    else:
+        messages = staff_visible_messages(messages)
+    data["can_reply_all"] = conversation.grants.filter(revoked_at=None).count() > 1 and (
+        grant is None or grant.kind != "bcc"
+    )
+    data["viewer_email"] = grant.email if grant else conversation.sender
     data["messages"] = [
         {
             "id": str(m.pk),
-            "author": m.staff.display_name if m.staff else ("You" if grant else m.grant.email),
+            "author": m.staff.display_name
+            if m.staff
+            else ("You" if grant and m.grant_id == grant.pk else m.grant.email),
             "author_type": "staff" if m.staff else "recipient",
+            "headers": safe_headers(m, grant),
+            "reply_to": str(m.reply_to_message_id) if m.reply_to_message_id else None,
+            "shared": m.shared,
             "audience": str(m.audience_id) if m.audience_id else None,
             "body": crypto.decrypt(m.body_ciphertext, message_context(m)).decode(),
             "created_at": m.created_at,
@@ -227,6 +272,20 @@ def detail(conversation, grant=None):
 
 def policy(user, data):
     sender = data["sender"].lower()
+    if settings.MAIL_PROVIDER == "smtp":
+        from .senders import SenderUnavailable
+        from .smtp_settings import configured, credential
+
+        try:
+            personal = credential(user)
+            if not configured(user):
+                raise SenderUnavailable("SMTP server or credentials need attention")
+        except SenderUnavailable:
+            raise Problem(
+                "Set up your personal SMTP sender in Connections first.", "smtp_setup_required", 409
+            )
+        if sender != personal.email:
+            raise Problem("Send using your personal SMTP sender address.", "sender_denied", 403)
     if sender not in user.sender_addresses or not is_company_address(
         sender, user.organization.domain
     ):
@@ -289,6 +348,9 @@ def attach_files(message, ids, *, user=None, grant=None):
         plaintext = crypto.decrypt(
             storage.get(attachment.object_key).decode(), attachment_context(attachment)
         )
+        from .evidence import capture_attachment
+
+        capture_attachment(attachment, plaintext)
         attachment.message = message
         ciphertext = crypto.encrypt(plaintext, attachment_context(attachment)).encode()
         attachment.object_key = (
@@ -378,6 +440,13 @@ def conversations(request):
                 "Acknowledge that the content will be sent by ordinary email.",
                 "nophi_acknowledgement_required",
             )
+
+        if decision.protected:
+            from .direct_chats import compose_secure
+
+            result = compose_secure(user, data, decision, record)
+            document_service.require_ready()
+            return Response(result, status=201)
 
         conversation = Conversation(
             organization=user.organization,
@@ -537,45 +606,103 @@ def save_reply(request, conversation, data, *, user=None, grant=None):
             audience = conversation.grants.filter(pk=data["audience"], revoked_at=None).first()
             if not audience:
                 unavailable()
-        message = Message(conversation=conversation, staff=user, grant=grant, audience=audience)
+        selected = None
+        if data.get("reply_to"):
+            selection = conversation.messages.select_related("grant")
+            if grant:
+                selection = visible_messages(selection, grant)
+            else:
+                selection = staff_visible_messages(selection)
+            selected = selection.filter(pk=data["reply_to"]).first()
+            if selected is None:
+                unavailable()
+        shared = data["reply_mode"] == "all"
+        if shared:
+            if grant and (grant.kind == "bcc" or conversation.grants.count() < 2):
+                raise Problem("Reply all is unavailable for a private copy.", status=400)
+            audience = None
+        elif selected and selected.grant_id and (not grant or selected.grant_id != grant.pk):
+            audience = selected.grant
+            active_grant(audience)
+        elif user and not audience and (selected or "reply_mode" in request.data):
+            if conversation.grants.count() == 1:
+                audience = conversation.grants.first()
+            else:
+                raise Problem(
+                    "Select a recipient's message to reply privately, or choose Reply all."
+                )
+        targets = conversation.grants.filter(revoked_at=None)
+        if audience:
+            targets = targets.filter(pk=audience.pk)
+        elif grant and not shared:
+            targets = targets.none()
+        if grant:
+            targets = targets.exclude(pk=grant.pk)
+        if shared:
+            targets = targets.exclude(kind="bcc")
+        sender_email = (
+            getattr(getattr(user, "staffsmtp", None), "email", conversation.sender)
+            if user
+            else grant.email
+        )
+        message = Message(
+            conversation=conversation,
+            staff=user,
+            grant=grant,
+            audience=audience,
+            shared=shared,
+            reply_to_message=selected,
+            mail_headers={
+                "from_name": user.display_name if user else grant.email,
+                "from_email": sender_email,
+                "to": ([conversation.sender] if grant else [])
+                + [g.email for g in targets if g.kind != "cc"],
+                "cc": [g.email for g in targets if g.kind == "cc"],
+                "bcc": [],
+            },
+        )
         message.body_ciphertext = crypto.encrypt(data["body"].encode(), message_context(message))
         message.save()
         attach_files(message, data["attachments"], user=user, grant=grant)
         conversation.state = "replied" if grant else "awaiting_recipient"
         conversation.updated_at = timezone.now()
         conversation.save(update_fields=["state", "updated_at"])
-        if grant:
+        if grant and (audience is None or shared):
             queue_mail(
                 conversation.organization,
                 {
-                    "to": conversation.owner.email,
+                    "to": getattr(
+                        getattr(conversation.owner, "staffsmtp", None),
+                        "email",
+                        conversation.owner.email,
+                    ),
                     "subject": "A secure conversation has a reply",
                     "body": "A recipient submitted a reply. Sign in to the portal to read it.",
                     "link": f"{settings.PUBLIC_URL}/#/messages/{conversation.pk}",
                 },
                 conversation=conversation,
             )
-        else:
-            targets = conversation.grants.filter(revoked_at=None)
-            if audience:
-                targets = targets.filter(pk=audience.pk)
-            for target in targets:
-                # Existing invitation tokens are never stored in plaintext: issue a fresh link.
-                token = secrets.token_urlsafe(32)
-                target.token_hash = digest(token)
-                target.save(update_fields=["token_hash"])
-                queue_mail(
-                    conversation.organization,
-                    {
-                        "to": target.email,
-                        "subject": "Your secure conversation has a reply",
-                        "body": "Open the portal and verify your email to read the reply. Respond only in the portal.",
-                        "link": f"{settings.RECIPIENT_PUBLIC_URL}/#/invite/{token}",
-                    },
-                    actor=user,
-                    conversation=conversation,
-                    grant=target,
-                )
+        for target in targets:
+            # Retain the old hash atomically with the new notification. All
+            # links inherit the grant's expiry/revocation and still require OTP.
+            RecipientInvitationToken.objects.get_or_create(
+                grant=target, token_hash=target.token_hash
+            )
+            token = secrets.token_urlsafe(32)
+            target.token_hash = digest(token)
+            target.save(update_fields=["token_hash"])
+            queue_mail(
+                conversation.organization,
+                {
+                    "to": target.email,
+                    "subject": "Your secure conversation has a reply",
+                    "body": "Open the portal and verify your email to read the reply. Respond only in the portal.",
+                    "link": f"{settings.RECIPIENT_PUBLIC_URL}/#/invite/{token}",
+                },
+                actor=user,
+                conversation=conversation,
+                grant=target,
+            )
         document_service.require_ready()
         IdempotencyRecord.objects.create(**record, resource_id=message.pk)
         audit(
@@ -606,11 +733,21 @@ class InvitationToken(serializers.Serializer):
 
 
 def token_grant(token):
+    token_hash = digest(token)
     grant = (
         RecipientGrant.objects.select_related("conversation__organization", "conversation__owner")
-        .filter(token_hash=digest(token))
+        .filter(token_hash=token_hash)
         .first()
     )
+    if grant is None:
+        previous = (
+            RecipientInvitationToken.objects.select_related(
+                "grant__conversation__organization", "grant__conversation__owner"
+            )
+            .filter(token_hash=token_hash)
+            .first()
+        )
+        grant = previous.grant if previous else None
     return active_grant(grant) if grant else unavailable()
 
 
@@ -647,6 +784,14 @@ def verification_grant(request, token):
 def issue_code(request):
     data = validate(InvitationToken, request.data)
     grant = verification_grant(request, data["token"])
+    from .smtp_settings import configured
+
+    if settings.MAIL_PROVIDER == "smtp" and not configured(grant.conversation.owner):
+        raise Problem(
+            "Verification email is unavailable. Ask the sender to configure their SMTP credentials.",
+            "otp_sender_unavailable",
+            503,
+        )
     rate_limit(request, "code-hour", grant.email, maximum=10, seconds=3600)
     rate_limit(request, "code-day", grant.email, maximum=30, seconds=86400)
     with transaction.atomic():
@@ -770,7 +915,10 @@ def recipient_logout(request):
     return Response({"locked": True})
 
 
-def upload_for(request, *, user=None, grant=None):
+def upload_for(request, *, user=None, grant=None, captured_metadata=None):
+    from . import evidence
+
+    provenance = captured_metadata or evidence.source_metadata(request)
     document_service.require_ready()
     org = user.organization if user else grant.conversation.organization
     rate_limit(request, "upload", str(user.pk if user else grant.pk), maximum=30)
@@ -811,6 +959,10 @@ def upload_for(request, *, user=None, grant=None):
         if not accepted:
             audit(org, user or grant.pk, "attachment.rejected", "upload", "", outcome="denied")
             raise Problem("This file was rejected by the scanner.", "unsafe_file")
+        attachment.sha256 = evidence.digest(data)
+        attachment.source_metadata_ciphertext = crypto.encrypt(
+            evidence.canonical(provenance), crypto.context(org.pk, "source-metadata", attachment.pk)
+        )
         attachment.size = len(data)
         attachment.media_type = media_type
         attachment.state = "available"
@@ -886,13 +1038,16 @@ def download(request, ident):
         and conversation.owner_id == user.pk
         and conversation.organization_id == user.organization_id
     ):
+        if not staff_visible_messages(Message.objects.filter(pk=attachment.message_id)).exists():
+            unavailable()
         actor = user
     else:
         grant = recipient(request)
         if (
             grant.conversation_id != conversation.pk
-            or (attachment.message.grant_id and attachment.message.grant_id != grant.pk)
-            or (attachment.message.audience_id and attachment.message.audience_id != grant.pk)
+            or not visible_messages(
+                Message.objects.filter(pk=attachment.message_id), grant
+            ).exists()
         ):
             unavailable()
         actor = grant.pk
@@ -901,6 +1056,10 @@ def download(request, ident):
     content = crypto.decrypt(
         storage.get(attachment.object_key).decode(), attachment_context(attachment)
     )
+    from .evidence import digest
+
+    if attachment.sha256 and digest(content) != attachment.sha256:
+        raise Problem("File integrity verification failed.", "integrity_failed", 503)
     name = crypto.decrypt(
         attachment.name_ciphertext,
         crypto.context(attachment.organization_id, "filename", attachment.pk),

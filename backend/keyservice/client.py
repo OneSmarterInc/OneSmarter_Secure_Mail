@@ -1,6 +1,7 @@
 """Small mTLS client with bounded responses, no redirects or environment proxies."""
 
 import http.client
+import socket
 from urllib.parse import urlsplit
 
 from backend.transport import tls
@@ -10,6 +11,23 @@ from .protocol import canonical, parse_object
 
 class ServiceUnavailable(ValueError):
     pass
+
+
+class LoopbackHTTPSConnection(http.client.HTTPSConnection):
+    """Prefer the local service's IPv4 listener, retaining localhost TLS identity."""
+
+    def connect(self):
+        try:
+            stream = socket.create_connection(
+                ("127.0.0.1", self.port), self.timeout, self.source_address
+            )
+        except OSError:
+            stream = socket.create_connection(("::1", self.port), self.timeout, self.source_address)
+        try:
+            self.sock = self._context.wrap_socket(stream, server_hostname=self.host)
+        except BaseException:
+            stream.close()
+            raise
 
 
 class Client:
@@ -42,9 +60,10 @@ class Client:
     def call(self, operation: str, **data) -> dict:
         if not operation.isascii() or not operation.replace("-", "").isalpha():
             raise ValueError("Invalid operation.")
-        conn = http.client.HTTPSConnection(
-            self.host, self.port, context=self.tls, timeout=self.timeout
+        connection_class = (
+            LoopbackHTTPSConnection if self.host == "localhost" else http.client.HTTPSConnection
         )
+        conn = connection_class(self.host, self.port, context=self.tls, timeout=self.timeout)
         try:
             conn.connect()
             tls.verify(conn.sock, required=self.require_pq)

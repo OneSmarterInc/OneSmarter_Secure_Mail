@@ -11,12 +11,20 @@ from django.utils import timezone
 from . import crypto
 from .client_ip import client_ip
 from .http import Problem
-from .models import AuditEvent, DeliveryJob, IdempotencyRecord, Organization, RateBucket
+from .models import (
+    AuditEvent,
+    AuditSequence,
+    DeliveryJob,
+    IdempotencyRecord,
+    Organization,
+    RateBucket,
+)
 
 
 def lock_organization(org):
     """Acquire first in multi-resource transactions for consistent lock ordering."""
-    return Organization.objects.select_for_update().get(pk=getattr(org, "pk", org))
+    # Protect business mutations without blocking foreign-key inserts (audit/outbox).
+    return Organization.objects.select_for_update(no_key=True).get(pk=getattr(org, "pk", org))
 
 
 def current_staff(request):
@@ -44,12 +52,13 @@ def keyed(value: str) -> str:
 def audit(
     org, actor, action: str, target_type: str, target_id, *, outcome="success", metadata=None
 ):
-    organization = lock_organization(org)
-    organization.audit_sequence += 1
-    organization.save(update_fields=["audit_sequence"])
+    org_id = getattr(org, "pk", org)
+    sequence, _ = AuditSequence.objects.select_for_update().get_or_create(organization_id=org_id)
+    sequence.value += 1
+    sequence.save(update_fields=["value"])
     return AuditEvent.objects.create(
-        organization=organization,
-        sequence=organization.audit_sequence,
+        organization_id=org_id,
+        sequence=sequence.value,
         actor_id=str(getattr(actor, "pk", actor or "system")),
         actor_label=getattr(actor, "display_name", "Recipient" if actor else "System"),
         actor_role=getattr(actor, "role", "recipient" if actor else "system"),
@@ -73,8 +82,6 @@ def rate_limit(
     # The identity bucket also prevents bypass by rotating source IPs.
     # Aggregate budgets run first, before allocating attacker-chosen identity rows.
     buckets = [(f"ip:{ip}", maximum * 5 if identity else maximum)]
-    if scope == "login":
-        buckets.append(("global", 1000))
     if identity and identity_budget:
         buckets.extend(
             [(f"identity:{identity}", maximum), (f"identity-ip:{identity}:{ip}", maximum)]
@@ -82,6 +89,7 @@ def rate_limit(
     period = seconds * 1_000_000
     now = timezone.now()
     rejected = False
+    retry_after = 0
     with transaction.atomic():
         for value, allowance in buckets:
             capacity = allowance * period
@@ -97,13 +105,23 @@ def rate_limit(
             bucket.refilled_at = max(previous, now)
             if bucket.credits < period:
                 rejected = True
+                # Integer ceiling; include a backwards-clock pause before refill.
+                deficit = period - bucket.credits
+                wait_us = (deficit + allowance - 1) // allowance
+                rollback = max(previous - now, timedelta(0))
+                wait_us += (
+                    rollback.days * 86400 + rollback.seconds
+                ) * 1_000_000 + rollback.microseconds
+                retry_after = max(1, (wait_us + 999_999) // 1_000_000)
             else:
                 bucket.credits -= period
             bucket.save(update_fields=["credits", "refilled_at"])
             if rejected:
                 break
     if rejected:
-        raise Problem("Too many attempts. Please try again later.", "rate_limited", 429)
+        problem = Problem("Too many attempts. Please try again later.", "rate_limited", 429)
+        problem.wait = retry_after  # DRF emits Retry-After without sleeping a worker.
+        raise problem
 
 
 def queue_mail(org, payload: dict, *, actor=None, conversation=None, grant=None):
@@ -121,7 +139,7 @@ def idempotency(request, org, actor: str, operation: str, payload: dict):
         raise Problem(
             "An Idempotency-Key of at most 100 characters is required.", "idempotency_required"
         )
-    Organization.objects.select_for_update().get(pk=org.pk)
+    Organization.objects.select_for_update(no_key=True).get(pk=org.pk)
     fingerprint = keyed(json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")))
     existing = IdempotencyRecord.objects.filter(
         organization=org, actor=actor, operation=operation, key=key

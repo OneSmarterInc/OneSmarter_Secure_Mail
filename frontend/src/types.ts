@@ -32,6 +32,15 @@ export interface Grant {
   last_opened: string | null;
 }
 export interface Message {
+  headers?: {
+    from_name: string;
+    from_email: string;
+    to: string[];
+    cc: string[];
+    bcc: string[];
+  };
+  shared?: boolean;
+  reply_to?: string | null;
   id: string;
   author: string;
   author_type: string;
@@ -47,6 +56,8 @@ export interface Delivery {
   error_code: string;
 }
 export interface Conversation {
+  can_reply_all?: boolean;
+  viewer_email?: string;
   id: string;
   subject: string;
   mode: string;

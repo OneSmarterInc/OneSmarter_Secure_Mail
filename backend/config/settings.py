@@ -142,6 +142,9 @@ KEY_SERVICE_URL = os.environ.get("KEY_SERVICE_URL", "")
 KEY_SERVICE_CA = os.environ.get("KEY_SERVICE_CA", "")
 KEY_SERVICE_CERT = os.environ.get("KEY_SERVICE_CERT", "")
 KEY_SERVICE_KEY = os.environ.get("KEY_SERVICE_KEY", "")
+KEY_SERVICE_REQUIRE_PQ = (
+    PQ_TRANSPORT_REQUIRED or os.environ.get("KEY_SERVICE_REQUIRE_PQ", "false") == "true"
+)
 KEY_STATUS_URL = os.environ.get("KEY_STATUS_URL") or KEY_SERVICE_URL
 KEY_STATUS_CA = os.environ.get("KEY_STATUS_CA") or KEY_SERVICE_CA
 KEY_STATUS_CERT = os.environ.get("KEY_STATUS_CERT") or KEY_SERVICE_CERT
@@ -198,7 +201,7 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_BEAT_SCHEDULE = {
     "transient-cleanup": {"task": "securemail.cleanup_transient", "schedule": 900.0},
-    "outbox": {"task": "securemail.process_pending", "schedule": 10.0},
+    "outbox": {"task": "securemail.process_pending", "schedule": 10.0, "options": {"expires": 10}},
     "audit-archive": {"task": "securemail.archive_audit", "schedule": 60.0},
 }
 STATIC_URL = "/static/"
@@ -216,3 +219,9 @@ if not SYNTHETIC_MODE:
         "Production is blocked: the OneSmarter cryptographic review, PQ coverage, retention/region and "
         "deployment evidence require security approval. See RELEASE_GATES.md."
     )
+
+# Evidence preservation is explicitly local; deployment never switches it to AWS.
+EVIDENCE_DIRECTORY = Path(os.environ.get("EVIDENCE_DIRECTORY", str(RUNTIME_DIR / "evidence")))
+EVIDENCE_TSA_URL = os.environ.get("EVIDENCE_TSA_URL", "")
+EVIDENCE_TSA_CA_FILE = os.environ.get("EVIDENCE_TSA_CA_FILE", "")
+EVIDENCE_OPENSSL = os.environ.get("EVIDENCE_OPENSSL", "openssl")

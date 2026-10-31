@@ -10,8 +10,8 @@ jobs:
       APP_ENV: test
       RUN_PQ_TRANSPORT: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: { python-version: "3.15" }
       - run: pip install -r requirements.lock -r requirements-test.lock
       - run: python scripts/init_local.py
@@ -23,13 +23,13 @@ jobs:
       APP_ENV: test
       REQUIRE_NGINX_TEST: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: { python-version: "3.12" }
       - run: sudo apt-get update && sudo apt-get install -y nginx
       - run: pip install -r requirements.lock
       - run: python scripts/init_local.py
-      - run: pytest backend/tests/test_rate_limits.py backend/tests/test_proxy_integration.py -q
+      - run: pytest backend/tests/test_rate_limits.py backend/tests/test_proxy_integration.py backend/tests/test_pq_ingress.py -q
   backend:
     runs-on: ubuntu-latest
     services:
@@ -49,8 +49,8 @@ jobs:
       POSTGRES_USER: secure_mail
       POSTGRES_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           {
             python-version: "3.12",
@@ -69,8 +69,8 @@ jobs:
     defaults:
       run: { working-directory: frontend }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           {
             node-version: "24",
@@ -80,23 +80,24 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run format:check
-      - run: npm audit --omit=dev --audit-level=high
+      - run: npm audit --audit-level=high
   browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       E2E_BROWSER: chromium
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: { python-version: "3.12" }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "24" }
       - run: pip install -r requirements.lock
       - run: npm ci
         working-directory: frontend
       - run: npx playwright install --with-deps chromium
         working-directory: frontend
-      - run: python scripts/check_browser.py
+      - run: python scripts/check_compose_browser.py
   scanner:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -106,8 +107,8 @@ jobs:
       CLAMAV_TRANSPORT: unix
       CLAMAV_SOCKET: /tmp/onesmarter-scanner/clamd.sock
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: { python-version: "3.12" }
       - run: pip install -r requirements.lock
       - run: python scripts/init_local.py
@@ -130,3 +131,12 @@ jobs:
       - name: Stop disposable scanner
         if: always()
         run: docker rm --force readiness-clamav
+
+  python-dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install pip-audit==2.10.1
+      - run: pip-audit --strict -r requirements.lock -r requirements-test.lock

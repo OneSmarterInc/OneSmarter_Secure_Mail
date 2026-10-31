@@ -63,6 +63,22 @@ def validate_new_secret(secret: bytes) -> None:
         raise ValueError("Use 32 cryptographically random bytes for new recovery custody.")
 
 
+def synthetic_import_enabled() -> bool:
+    """Operator opt-in, never a capability selectable by an API caller."""
+    return (
+        os.environ.get("KEY_SERVICE_ALLOW_SYNTHETIC_IMPORT", "").lower() == "true"
+        and os.environ.get("SYNTHETIC_MODE", "").lower() == "true"
+        and os.environ.get("APP_ENV", "") in {"development", "test"}
+    )
+
+
+def require_synthetic_import() -> None:
+    if not synthetic_import_enabled():
+        raise PermissionError(
+            "Private-key import is disabled outside explicitly enabled synthetic mode."
+        )
+
+
 class KeyStore:
     def __init__(self, path: Path, backup_directory: Path | None = None):
         if not path.is_file():
@@ -138,13 +154,22 @@ class KeyStore:
                 try:
                     for snapshot in self.pending_snapshots:
                         snapshot.replace(snapshot.with_suffix(".sqlite3"))
-                    if self.pending_snapshots:
+                    if (
+                        self.pending_snapshots
+                        and not db.execute(
+                            "SELECT 1 FROM meta WHERE name='root_recovery_pending'"
+                        ).fetchone()
+                    ):
+                        current_root = db.execute(
+                            "SELECT value FROM meta WHERE name='root_id'"
+                        ).fetchone()[0]
                         committed = sorted(
                             path
                             for path in self.backup_directory.glob("*.sqlite3")
                             if re.fullmatch(r"[0-9]+-[0-9a-f-]{36}\.sqlite3", path.name)
+                            and self.snapshot_root(path) == current_root
                         )
-                        for obsolete in committed[:-3]:
+                        for obsolete in self.expired_snapshots(committed, time.time_ns()):
                             if obsolete.is_symlink():
                                 raise OSError("Refusing symlink snapshot")
                             obsolete.unlink()
@@ -154,7 +179,7 @@ class KeyStore:
                                 os.fsync(fd)
                             finally:
                                 os.close(fd)
-                except OSError as exc:
+                except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
                     self.root = None
                     raise OSError(
                         "Keys committed but backup publication failed; store sealed"
@@ -336,7 +361,8 @@ class KeyStore:
             return result
 
     def import_version(self, org: str, ident: str, raw: bytes, actor: str) -> dict:
-        """Explicit custodian migration only; imports are never automatically activated."""
+        """Opt-in synthetic migration only; imports are never automatically activated."""
+        require_synthetic_import()
         org, ident = str(uuid.UUID(org)), str(uuid.UUID(ident))
         p.private_keys(raw)
         with self.transaction() as db:
@@ -455,15 +481,14 @@ class KeyStore:
                 raise ValueError(
                     "Configure an explicit independent backup destination before rotation"
                 )
-            old_snapshots = (
-                [
-                    path
-                    for path in self.backup_directory.iterdir()
-                    if re.fullmatch(r"[0-9]+-[0-9a-f-]{36}\.(sqlite3|pending)", path.name)
-                ]
-                if self.backup_directory.exists()
-                else []
-            )
+            # Publish a recoverable old-root checkpoint before changing any keys.
+            with self.transaction() as db:
+                self._ready(db)
+                if self.root_id != expected:
+                    raise ConflictError("Root changed; verify status before rotating.")
+                if db.execute("SELECT 1 FROM meta WHERE name='root_recovery_pending'").fetchone():
+                    raise ConflictError("Verify recovery of the previous root rotation first.")
+                self._checkpoint(db)
             with self.transaction() as db:
                 self._ready(db)
                 if self.root_id != expected:
@@ -483,18 +508,12 @@ class KeyStore:
                     (protect(new_secret, root, ident.encode()),),
                 )
                 self._audit(db, actor, "rotate_root", ident=ident)
+                db.execute(
+                    "INSERT INTO meta(name,value) VALUES ('root_recovery_pending',?)", (ident,)
+                )
                 self._checkpoint(db)
             self.root, self.root_id = root, ident
-            # The new committed snapshot retains every private version under the
-            # new root. Retire managed old-root copies only after publication.
-            snapshots_retired = True
-            for snapshot in old_snapshots:
-                try:
-                    if snapshot.is_symlink():
-                        raise OSError("Refusing symlink backup")
-                    snapshot.unlink(missing_ok=True)
-                except OSError:
-                    snapshots_retired = False
+            # Retain old-root and pending files until explicit recovery verification.
             # Rotation is committed. Report cleanup independently; never imply rollback.
             sanitized = False
             try:
@@ -510,9 +529,70 @@ class KeyStore:
                 pass
             return {
                 "root_id": ident,
-                "storage_cleanup_complete": sanitized and snapshots_retired,
-                "snapshot_cleanup_complete": snapshots_retired,
+                "storage_cleanup_complete": sanitized,
+                "snapshot_cleanup_complete": False,
+                "recovery_verification_required": True,
             }
+
+    @staticmethod
+    def snapshot_root(path: Path) -> str:
+        if path.is_symlink():
+            raise ValueError("Refusing symlink snapshot")
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            return db.execute("SELECT value FROM meta WHERE name='root_id'").fetchone()[0]
+
+    def verify_root_recovery(
+        self, secret: bytes, expected: str, destination: Path, actor: str
+    ) -> dict:
+        """Recovery drill is offline and excludes a running service owner."""
+        from .ownership import StoreOwnership
+
+        ownership = StoreOwnership(self.path)
+        try:
+            return self._verify_root_recovery(secret, expected, destination, actor)
+        finally:
+            ownership.close()
+
+    def _verify_root_recovery(
+        self, secret: bytes, expected: str, destination: Path, actor: str
+    ) -> dict:
+        with self.lock:
+            if self.backup_directory is None:
+                raise ValueError("Explicit backup directory required")
+            try:
+                self.unseal(secret, actor)
+                if self.root_id != expected:
+                    raise ConflictError("Root changed; recovery verification refused")
+                self.backup_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                proof = self.backup_directory / f"recovery-proof-{uuid.uuid4()}.sqlite3"
+                self.backup(proof)
+                # Uses the actual restore path: integrity, audit, root and every
+                # private key are verified, then a standalone sealed DB is published.
+                restored = self.restore(proof, destination, secret)
+                if self.snapshot_root(restored.path) != expected:
+                    raise ConflictError("Restored root differs from the live root")
+                with self.transaction() as db:
+                    self._ready(db)
+                    db.execute("DELETE FROM meta WHERE name='root_recovery_pending'")
+                    db.execute(
+                        "INSERT OR REPLACE INTO meta(name,value) VALUES ('root_recovery_verified',?)",
+                        (expected,),
+                    )
+                    self._audit(db, actor, "root_recovery_verified", ident=expected)
+                retired = 0
+                for path in self.backup_directory.glob("*.sqlite3"):
+                    if re.fullmatch(r"[0-9]+-[0-9a-f-]{36}\.sqlite3", path.name):
+                        if self.snapshot_root(path) != expected:
+                            path.unlink()
+                            retired += 1
+                self.record_event(actor, "old_root_snapshots_retired")
+                return {
+                    "root_id": expected,
+                    "retired_snapshots": retired,
+                    "restored_store": str(destination),
+                }
+            finally:
+                self.seal("offline-recovery-verification-complete")
 
     def custody_status(self) -> dict:
         with self.transaction() as db:
@@ -521,10 +601,36 @@ class KeyStore:
                 "root_id": db.execute("SELECT value FROM meta WHERE name='root_id'").fetchone()[0],
                 "sealed": self.root is None,
                 "suite": p.SUITE,
+                "recovery_verification_required": bool(
+                    db.execute("SELECT 1 FROM meta WHERE name='root_recovery_pending'").fetchone()
+                ),
             }
+
+    @staticmethod
+    def expired_snapshots(paths: list[Path], now_ns: int) -> list[Path]:
+        """Keep 7 days in full, one daily anchor through 30 days, and newest 3."""
+        day = 86400 * 1_000_000_000
+        ordered = sorted(paths, key=lambda path: int(path.name.split("-", 1)[0]))
+        keep = set(ordered[-3:])
+        daily = set()
+        for path in ordered:
+            timestamp = int(path.name.split("-", 1)[0])
+            age = now_ns - timestamp
+            if age <= 7 * day:
+                keep.add(path)  # Also preserve future timestamps after clock rollback.
+            elif age <= 30 * day and timestamp // day not in daily:
+                keep.add(path)  # Earliest available snapshot per UTC day.
+                daily.add(timestamp // day)
+        return [path for path in ordered if path not in keep]
 
     def _checkpoint(self, db):
         """Durable snapshot of pending keys BEFORE the live transaction can commit."""
+        try:
+            self.verify_audit(db)
+        except (ValueError, TypeError):
+            self.root = self.root_id = self.seal_epoch = None
+            self.audit_integrity = "failed"
+            raise
         if self.backup_directory is None:
             raise ValueError(
                 "Configure an explicit independent backup destination before changing keys"
@@ -544,12 +650,14 @@ class KeyStore:
         destination.chmod(0o600)
         try:
             with closing(sqlite3.connect(destination)) as target:
+                target.row_factory = sqlite3.Row
                 target.execute("PRAGMA synchronous=FULL")
                 # Dump from this transaction sees its uncommitted rotation. Opening
                 # another source connection would silently omit the pending key.
                 target.executescript("\n".join(db.iterdump()))
                 if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise ValueError("Backup verification failed")
+                self.verify_audit(target)
             with destination.open("r+b") as stream:
                 os.fsync(stream.fileno())
             if os.name != "nt":

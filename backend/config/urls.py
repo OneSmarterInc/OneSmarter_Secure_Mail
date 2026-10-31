@@ -1,9 +1,12 @@
 from django.urls import path
 
-from backend.apps.core import accounts, audit, auth, views
+from backend.apps.core import accounts, audit, auth, evidence, smtp_settings, views
 from backend.apps.core import conversations as mail
 
 urlpatterns = [
+    path("api/evidence", evidence.catalog),
+    path("api/evidence/capture", evidence.capture_url),
+    path("api/evidence/<uuid:ident>/export", evidence.export_capture),
     path("api/document-service", views.document_service_status),
     path("recipient-api/document-service", views.document_service_status),
     path("recipient-api/auth/session", auth.recipient_session),
@@ -26,6 +29,10 @@ urlpatterns = [
     path("api/auth/activate", auth.activate),
     path("api/dashboard", views.dashboard),
     path("api/settings", views.connection_settings),
+    path("api/settings/smtp", smtp_settings.smtp_settings),
+    path("api/settings/smtp/organization", smtp_settings.organization_settings),
+    path("api/settings/smtp/personal", smtp_settings.personal_settings),
+    path("api/settings/smtp/check", smtp_settings.check_smtp),
     path("api/settings/checks", views.check_connections),
     path("api/routing/preview", mail.route_preview),
     path("api/conversations", mail.conversations),

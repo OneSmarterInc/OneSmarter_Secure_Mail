@@ -81,6 +81,49 @@ def race(*operations):
         return [future.result(timeout=30) for future in futures]
 
 
+def test_audit_does_not_wait_for_organization_business_lock(org):
+    from backend.apps.core.services import audit, lock_organization
+
+    audit(org, None, "test.seed", "organization", org.pk)
+
+    def append():
+        close_old_connections()
+        try:
+            return audit(org.pk, None, "test.independent", "organization", org.pk).sequence
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with transaction.atomic():
+            lock_organization(org)
+            assert pool.submit(append).result(timeout=5) > 0
+
+
+def test_parallel_audit_sequence_and_outbox_owner(org):
+    from backend.apps.core.outbox_lock import outbox_lock
+    from backend.apps.core.services import audit
+
+    def append():
+        return audit(org.pk, None, "test.concurrent", "organization", org.pk).sequence
+
+    sequences = race(*([append] * 4))
+    assert len(set(sequences)) == 4
+
+    def attempt():
+        close_old_connections()
+        try:
+            with outbox_lock() as acquired:
+                return acquired
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with outbox_lock() as acquired:
+            assert acquired
+            assert pool.submit(attempt).result(timeout=5) is False
+        assert pool.submit(attempt).result(timeout=5) is True
+
+
 def test_same_otp_is_consumed_once(staff_client):
     response = compose(staff_client)
     conversation = Conversation.objects.get(pk=response.json()["id"])

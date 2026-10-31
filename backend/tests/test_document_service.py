@@ -96,16 +96,14 @@ def test_queued_delivery_waits_and_resumes(staff_client, monkeypatch):
     assert job.state == "development_delivered"
 
 
-def test_sealing_before_smtp_defers_without_sending(
+def test_sealed_admission_defers_without_sending(
     staff_client, monkeypatch, settings, sender_profile
 ):
     from backend.apps.core import mail
 
     assert compose(staff_client).status_code == 201
     job = DeliveryJob.objects.get()
-    monkeypatch.setattr(
-        document_service, "read_status", Mock(side_effect=[READY, READY, {"sealed": True}])
-    )
+    monkeypatch.setattr(document_service, "read_status", Mock(return_value={"sealed": True}))
     transport = Mock()
     monkeypatch.setattr(mail, "EmailMultiAlternatives", transport)
     settings.MAIL_PROVIDER = "smtp"
@@ -114,4 +112,5 @@ def test_sealing_before_smtp_defers_without_sending(
     process_job(job.pk)
     transport.return_value.send.assert_not_called()
     job.refresh_from_db()
-    assert job.state == "retry" and job.error_code == "service_disabled"
+    assert job.state == "queued" and job.error_code == "service_disabled"
+    assert document_service.read_status.call_count == 1

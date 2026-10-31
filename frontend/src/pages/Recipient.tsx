@@ -1,8 +1,16 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api, post, ApiError } from "../api";
 import type { Conversation, FileItem } from "../types";
-import { Brand, ErrorNotice, Icon, Loading } from "../components/ui";
+import { Badge, Brand, ErrorNotice, Icon, Loading } from "../components/ui";
 import { ReplyForm, ThreadContent } from "./Mail";
+import { RecipientCatalog } from "./RecipientCatalog";
+
+function failureStage(error: unknown, token: string) {
+  if (error instanceof ApiError && error.status === 404) return "unavailable";
+  if (error instanceof ApiError && error.status === 401)
+    return token ? "reverify" : "invitation";
+  return "retry";
+}
 
 export function Recipient({ token }: { token: string }) {
   const [draft, setDraft] = useState<{ body: string; files: FileItem[] }>({
@@ -15,6 +23,8 @@ export function Recipient({ token }: { token: string }) {
   } | null>(null);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [stage, setStage] = useState("landing");
+  const [view, setView] = useState<"conversation" | "catalog">("conversation");
+  const [composerOpen, setComposerOpen] = useState(false);
   const [code, setCode] = useState("");
   const [cooldown, setCooldown] = useState(0);
   const [error, setError] = useState("");
@@ -24,6 +34,7 @@ export function Recipient({ token }: { token: string }) {
     setConversation(null);
     setError("");
     setStage("landing");
+    setView("conversation");
     setDraft({ body: "", files: [] });
     if (!token) {
       void api<Conversation>("/recipient/conversation")
@@ -33,10 +44,10 @@ export function Recipient({ token }: { token: string }) {
             setStage("read");
           }
         })
-        .catch(() => {
+        .catch((err: unknown) => {
           if (live) {
-            setStage("unavailable");
-            setError("Open your latest invitation email to verify again.");
+            setStage(failureStage(err, token));
+            setError((err as Error).message);
           }
         });
       return () => {
@@ -69,7 +80,7 @@ export function Recipient({ token }: { token: string }) {
     const controller = new AbortController();
     const expire = () => {
       setConversation(null);
-      setStage("reverify");
+      setStage(token ? "reverify" : "invitation");
       setError(
         "Your access ended. Verify again if the invitation is still active.",
       );
@@ -85,13 +96,7 @@ export function Recipient({ token }: { token: string }) {
         .catch((err: unknown) => {
           if (controller.signal.aborted) return;
           setConversation(null);
-          setStage(
-            err instanceof ApiError && err.status === 404
-              ? "unavailable"
-              : err instanceof ApiError && err.status === 401
-                ? "reverify"
-                : "read",
-          );
+          setStage(failureStage(err, token));
           setError((err as Error).message);
           if (err instanceof ApiError && err.status === 404)
             setDraft({ body: "", files: [] });
@@ -134,25 +139,17 @@ export function Recipient({ token }: { token: string }) {
       window.removeEventListener("scroll", active, true);
     };
   }, [stage, token]);
-  useEffect(() => {
-    if (stage !== "reverify") return;
-    // Send once per transition; preserve the draft throughout verification.
-    setStage("code");
-    setCode("");
-    setBusy(true);
-    void post("/recipient/code", { token })
-      .then(() => {
-        setCooldown(30);
-        setError("");
-      })
-      .catch((err: unknown) => setError((err as Error).message))
-      .finally(() => setBusy(false));
-  }, [stage, token]);
   async function requestCode() {
+    if (!token) {
+      setStage("invitation");
+      return;
+    }
+    if (busy || cooldown > 0) return;
     setBusy(true);
     setError("");
     try {
       await post("/recipient/code", { token });
+      setCode("");
       setStage("code");
       setCooldown(30);
     } catch (err) {
@@ -184,18 +181,19 @@ export function Recipient({ token }: { token: string }) {
     }
   }
   async function refresh() {
+    setBusy(true);
+    setError("");
     try {
       setConversation(await api<Conversation>("/recipient/conversation"));
+      setStage("read");
     } catch (err) {
       setConversation(null);
-      setStage(
-        err instanceof ApiError && err.status === 404
-          ? "unavailable"
-          : "reverify",
-      );
+      setStage(failureStage(err, token));
       if (err instanceof ApiError && err.status === 404)
         setDraft({ body: "", files: [] });
       setError((err as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
   async function lock() {
@@ -204,11 +202,38 @@ export function Recipient({ token }: { token: string }) {
     } finally {
       setConversation(null);
       setDraft({ body: "", files: [] });
-      setStage(token ? "landing" : "unavailable");
+      setStage(token ? "landing" : "invitation");
     }
   }
   return (
-    <div className="recipient-layout">
+    <div
+      className={`recipient-layout${conversation ? " recipient-workspace" : ""}`}
+    >
+      {conversation && (
+        <aside className="recipient-sidebar">
+          <Brand />
+          <nav aria-label="Recipient navigation">
+            <button
+              aria-current={view === "conversation" ? "page" : undefined}
+              onClick={() => setView("conversation")}
+            >
+              <Icon name="mail" />
+              Conversations
+            </button>
+            <button
+              aria-current={view === "catalog" ? "page" : undefined}
+              onClick={() => setView("catalog")}
+            >
+              <Icon name="file" />
+              Archive
+            </button>
+          </nav>
+          <div className="recipient-sidebar-note">
+            <Icon name="lock" size={16} />
+            Private recipient portal
+          </div>
+        </aside>
+      )}
       <header className="recipient-header">
         <Brand />
         <span className="muted">
@@ -220,36 +245,88 @@ export function Recipient({ token }: { token: string }) {
         )}
       </header>
       <main className={conversation ? "recipient-thread" : "recipient-verify"}>
-        {stage === "unavailable" ? (
+        {stage === "invitation" ? (
+          <div className="card center">
+            <h1>Open your invitation email</h1>
+            <p>
+              Your session has ended. Open the link in your latest invitation
+              email to verify again.
+            </p>
+            <p>
+              No verification email has been sent. Contact the sender if you
+              cannot find your invitation.
+            </p>
+          </div>
+        ) : stage === "retry" ? (
+          <div className="card center">
+            <h1>Unable to load your conversation</h1>
+            <ErrorNotice message={error} />
+            <button disabled={busy} onClick={() => void refresh()}>
+              Try again
+            </button>
+          </div>
+        ) : stage === "unavailable" ? (
           <div className="card center">
             <span className="icon-tile">
               <Icon name="lock" size={28} />
             </span>
             <h1>This message is unavailable</h1>
             <p>
-              A newer reply may have replaced this link. Try the latest
-              notification. Access may also have expired or been revoked;
-              contact the sender if needed.
+              Access may have expired or been revoked, or the link may be
+              invalid. Contact the sender if needed.
             </p>
           </div>
         ) : conversation ? (
           <>
-            <div className="recipient-title">
-              <span className="eyebrow">EMAIL VERIFIED</span>
-              <h1>{conversation.subject}</h1>
-              <p>
-                Your reply and files will be submitted inside this conversation.
-              </p>
+            {view === "catalog" && (
+              <RecipientCatalog conversation={conversation} />
+            )}
+            <div
+              className="recipient-chat-view"
+              hidden={view !== "conversation"}
+            >
+              <header className="conversation-header recipient-conversation-header">
+                <div className="conversation-heading">
+                  <h1>{conversation.subject}</h1>
+                </div>
+                <Badge tone="success">
+                  <Icon name="shield" size={14} /> Email verified
+                </Badge>
+                {!composerOpen && (
+                  <button
+                    type="button"
+                    className="primary conversation-new-message"
+                    onClick={() =>
+                      window.dispatchEvent(
+                        new CustomEvent("open-secure-composer", {
+                          detail: { conversationId: conversation.id },
+                        }),
+                      )
+                    }
+                  >
+                    <Icon name="plus" size={18} /> New message
+                  </button>
+                )}
+              </header>
+              <ErrorNotice message={error} />
+              <div
+                className="conversation-stream"
+                role="region"
+                aria-label="Conversation messages and reply"
+                tabIndex={0}
+              >
+                <ReplyForm
+                  conversation={conversation}
+                  recipientMode
+                  headerLauncher
+                  onExpandedChange={setComposerOpen}
+                  draft={draft}
+                  onDraftChange={setDraft}
+                  onSent={() => void refresh()}
+                />
+                <ThreadContent conversation={conversation} />
+              </div>
             </div>
-            <ErrorNotice message={error} />
-            <ThreadContent conversation={conversation} />
-            <ReplyForm
-              conversation={conversation}
-              recipientMode
-              draft={draft}
-              onDraftChange={setDraft}
-              onSent={() => void refresh()}
-            />
           </>
         ) : (
           <div className="card center">
@@ -307,7 +384,12 @@ export function Recipient({ token }: { token: string }) {
             ) : (
               <button
                 className="primary full"
-                disabled={busy || !landing}
+                disabled={
+                  busy ||
+                  !token ||
+                  cooldown > 0 ||
+                  (stage === "landing" && !landing)
+                }
                 onClick={() => void requestCode()}
               >
                 Email me a code

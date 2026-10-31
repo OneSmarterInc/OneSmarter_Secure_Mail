@@ -1,16 +1,26 @@
 import json
 import smtplib
+import time
 from datetime import timedelta
+from email.utils import formataddr
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
 from django.utils import timezone
 
-from . import crypto, document_service, senders, storage
+from . import crypto, document_service, senders, smtp_settings, storage
 from .email_templates import notification_html
-from .models import Attachment, DeliveryJob, OTPChallenge, StaffInvitation
-from .services import audit, digest, lock_organization
+from .models import (
+    Attachment,
+    DeliveryJob,
+    OrganizationSMTP,
+    OTPChallenge,
+    RecipientInvitationToken,
+    StaffInvitation,
+)
+from .outbox_lock import outbox_lock
+from .services import audit, digest
 
 
 def payload(job):
@@ -21,10 +31,13 @@ def payload(job):
     )
 
 
-def process_job(job_id):
-    org_id = DeliveryJob.objects.values_list("organization_id", flat=True).get(pk=job_id)
+def process_job(job_id, *, service_ready=None):
+    if service_ready is None:
+        has_conversation = DeliveryJob.objects.filter(
+            pk=job_id, conversation__isnull=False
+        ).exists()
+        service_ready = document_service.ready() if has_conversation else True
     with transaction.atomic():
-        lock_organization(org_id)
         job = (
             DeliveryJob.objects.select_for_update(of=("self",))
             .select_related("actor", "conversation", "grant", "organization")
@@ -32,7 +45,7 @@ def process_job(job_id):
         )
         if job.state not in {"queued", "retry"} or job.next_attempt > timezone.now():
             return
-        if job.conversation_id and not document_service.ready():
+        if job.conversation_id and not service_ready:
             job.error_code = "service_disabled"
             job.next_attempt = timezone.now() + timedelta(seconds=15)
             job.save(update_fields=["error_code", "next_attempt", "updated_at"])
@@ -62,6 +75,9 @@ def process_job(job_id):
             job.grant
             and "/#/invite/" in data.get("link", "")
             and digest(data["link"].rsplit("/", 1)[-1]) != job.grant.token_hash
+            and not RecipientInvitationToken.objects.filter(
+                grant=job.grant, token_hash=digest(data["link"].rsplit("/", 1)[-1])
+            ).exists()
         ):
             job.state, job.error_code = "cancelled", "invitation_superseded"
             job.payload_ciphertext = ""
@@ -119,14 +135,17 @@ def process_job(job_id):
     submission_started = False
     smtp_connection = None
     try:
-        if job.conversation_id and not document_service.ready():
-            raise document_service.ServiceDisabled()
         if settings.MAIL_PROVIDER == "development" and settings.SYNTHETIC_MODE:
             state = "development_delivered"
         else:
             ordinary = bool(job.conversation and not job.conversation.protected)
-            sender = senders.address(
-                data.get("from", "") if ordinary else settings.DEFAULT_FROM_EMAIL
+            owner = job.conversation.owner if job.conversation else job.actor
+            if owner is None or owner.organization_id != job.organization_id:
+                raise senders.SenderUnavailable("No authorized staff SMTP identity")
+            sender, smtp_connection = (
+                smtp_settings.otp_connection(owner)
+                if data.get("challenge_id")
+                else smtp_settings.connection(owner)
             )
             if ordinary and (
                 not job.actor
@@ -135,14 +154,21 @@ def process_job(job_id):
                 or job.actor.organization_id != job.organization_id
             ):
                 raise senders.SenderUnavailable("Sender authority was withdrawn")
-            smtp_connection = senders.connection(sender)
             text = data["body"] + ("\n\n" + data["link"] if data.get("link") else "")
             if job.conversation and job.conversation.protected:
                 text += "\n\nDo not reply. Please respond through the secure portal."
             message = EmailMultiAlternatives(
                 subject=data["subject"],
                 body=text,
-                from_email=sender,
+                from_email=formataddr(
+                    (
+                        OrganizationSMTP.objects.get(
+                            organization_id=owner.organization_id
+                        ).sender_name,
+                        sender,
+                    )
+                ),
+                reply_to=[smtp_connection.username if data.get("challenge_id") else sender],
                 connection=smtp_connection,
                 to=[data["to"]],
                 headers={"Message-ID": f"<{job.pk}@{settings.COMPANY_DOMAIN}>"},
@@ -169,8 +195,6 @@ def process_job(job_id):
                     crypto.context(attachment.organization_id, "filename", attachment.pk),
                 ).decode()
                 message.attach(name, document, attachment.media_type)
-            if job.conversation_id and not document_service.ready():
-                raise document_service.ServiceDisabled()
             smtp_connection.open()  # Connect, TLS and authenticate before submission.
             submission_started = True
             if message.send(fail_silently=False) != 1:
@@ -201,7 +225,6 @@ def process_job(job_id):
             except (OSError, smtplib.SMTPException):
                 pass  # QUIT failure cannot undo a confirmed DATA acceptance.
     with transaction.atomic():
-        lock_organization(org_id)
         job = DeliveryJob.objects.select_for_update().get(pk=job_id)
         job.state, job.error_code = state, error
         if error == "mail_connection_failed" and state == "retry":
@@ -224,14 +247,28 @@ def process_job(job_id):
 
 
 def process_pending():
+    with outbox_lock() as acquired:
+        if not acquired:
+            return
+        _process_batch()
+
+
+def _process_batch():
     # Recover jobs abandoned in 'sending' without risking blind duplicate delivery.
     DeliveryJob.objects.filter(
         state="sending", updated_at__lt=timezone.now() - timedelta(minutes=5)
     ).update(state="uncertain", error_code="worker_interrupted")
-    for ident in DeliveryJob.objects.filter(
-        state__in=["queued", "retry"], next_attempt__lte=timezone.now()
-    ).values_list("pk", flat=True)[:100]:
-        process_job(ident)
+    jobs = list(
+        DeliveryJob.objects.filter(state__in=["queued", "retry"], next_attempt__lte=timezone.now())
+        .order_by("next_attempt", "created_at", "pk")
+        .values_list("pk", "conversation_id")[:100]
+    )
+    ready = document_service.ready() if any(conversation for _, conversation in jobs) else True
+    deadline = time.monotonic() + 30
+    for ident, _ in jobs:
+        if time.monotonic() >= deadline:
+            break
+        process_job(ident, service_ready=ready)
     DeliveryJob.objects.filter(created_at__lt=timezone.now() - timedelta(days=1)).exclude(
         payload_ciphertext=""
     ).exclude(state__in=["queued", "retry"]).update(payload_ciphertext="")

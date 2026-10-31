@@ -84,7 +84,7 @@ Optional rewrapping unwraps the existing DEK and wraps it using the new version.
 .\.venv\Scripts\python.exe manage.py rewrap_keys --organization <UUID> --limit 100 --apply
 ```
 
-Repeat batches until candidates is zero. A failed record keeps its original pointer; completed records remain usable. File rewrapping writes a new object before atomically changing its database pointer. Old file objects remain until an approved cleanup policy permits removal. No key deletion command is provided. Audit events record activation and successful rewraps.
+Repeat batches until candidates is zero and all skipped counters are reconciled. Per-record `CryptoUnavailable` failures (including MFA envelopes without a service pin) increment `skipped_crypto_unavailable` and leave the entire record unchanged; later records continue and skips do not consume the successful-candidate batch allowance. The command reports legacy, invalid and crypto-unavailable skips and warns that migration is incomplete. The generic exception cannot distinguish a missing MFA pin from a temporary key-service outage: investigate before choosing trusted MFA re-enrollment or retrying after recovery. Dry runs count candidates without testing unwrap eligibility. Active-key changes and non-crypto storage/database failures still stop the run rather than hiding operational errors. Completed records remain usable. File rewrapping writes a new object before atomically changing its database pointer. Old file objects remain until an approved cleanup policy permits removal. No key deletion command is provided. Audit events record activation and successful rewraps.
 
 Root-protector rotation and organization wrapping-version rotation are different operations. The synthetic service atomically re-protects all private records and its root header in one SQLite transaction, then switches the in-memory root. Failed transactions roll back. This serializes key operations and needs capacity testing. Existing encrypted backups still need their matching old recovery secret. Legacy KMS records, if discovered, are rejected; migration of such records requires a separately reviewed recovery plan before rollout.
 
@@ -108,7 +108,7 @@ Algorithm/API references: [Cryptography ML-KEM documentation](https://cryptograp
 ## 29 October review remediation and rollout
 
 See [V2_REMEDIATION.md](V2_REMEDIATION.md) for exact status and test evidence.
-Key mutations require an explicit backup directory. Configure independently operated off-host storage; a different local folder does not satisfy disaster recovery. Managed snapshots retain three committed generations per root; root rotation publishes a full new-root snapshot before retiring managed old-root generations (including stale pending copies). All wrapping private versions remain in the current store and newest snapshot, so document retention is unchanged. Monitor `snapshot_cleanup_complete` and `storage_cleanup_complete`; a false result is an unresolved incident, not successful cryptographic erasure. Offline copies, storage snapshots, SSD remnants and remote replica retention require an operator inventory and coordinated retirement.
+Key mutations require an explicit backup directory. Configure independently operated off-host storage; a different local folder does not satisfy disaster recovery. Checkpoints verify both source and copied audit chains before publication. Current-root committed snapshots retain all seven days of history, the earliest available snapshot per UTC day through day 30, and at least the newest three regardless of age. Pruning pauses while root recovery verification is pending. Root rotation retains old-root copies until the offline new-secret unseal and restore drill succeeds; `.pending` files require separate reconciliation. All wrapping private versions remain in the current store and newest snapshot, so document retention is unchanged. `snapshot_cleanup_complete=false` immediately after rotation means recovery verification is still required; it does not imply rotation rolled back. Offline copies, recovery-proof artifacts, filesystem snapshots, SSD remnants and remote replica retention require a separate inventory and retirement procedure. See KEY_SERVICE_OPERATIONS.md for the authoritative candidate policy, capacity implications and production approval requirements.
 
 Snapshots are prepared as `.pending` and published only after the live SQLite commit. A failed transaction removes its pending copy. A crash between commit and publication requires operator reconciliation against the live store; automatic restore refuses pending files. Restore checkpoints the destination WAL before atomic publication. Snapshot creation still copies the full audit history under the store lock; large-history performance and independent checkpointing remain release work.
 
@@ -121,3 +121,49 @@ The isolated key service now pins the current MFA data-key digest per enrollment
 3. For documents, the authorized sender/recipient re-submits the trusted original using the existing authenticated upload-and-reply flow. This runs validation, real scanning when configured, fresh envelope encryption and audit recording. Preserve the old record identifier in the operator incident record; do not overwrite historical submissions.
 4. Recreate messages from the verified original source as explicit new submissions. Reset MFA through the privileged administrator workflow and emailed recovery link; issue fresh invitation/OTP notifications instead of importing old secrets.
 5. Verify staff retrieval and new authenticated envelopes before closing each inventory item. The migration's skipped counters must be reconciled; there is no automated bypass or unsigned legacy-envelope conversion command.
+
+### Local custody cutover — 30 October 2026
+
+The local application now uses `KEY_PROTECTOR=key-service` and
+`KEY_SERVICE_REQUIRE_PQ=true`. This independent transport setting permits the
+synthetic loopback HTTP portal while requiring PQ mTLS for actual key operations;
+production still requires the complete PQ transport profile. The old runtime
+`wrapping.key` was moved into protected rollback custody, not destroyed.
+The migration identity was revoked and the service restarted without synthetic
+import enabled. The workload has wrap/unwrap/rewrap/status/version access only.
+
+`backend/apps/core/custody_migration.py` performs an offline cutover with separate
+maintenance and workload clients. Stop every writer and take consistent database,
+object, key-store, policy and configuration backups first. It verifies local
+plaintext before remote mutations, imports existing versions as decrypt-only,
+creates a service active version if needed, and registers current authenticated
+MFA DEKs through normal service wrap without changing their plaintext. File
+ciphertexts are preserved. Database key references change only after all eligible
+plaintext hashes match. This routine is for synthetic local migration, not an
+unauthorized production key import route. It does not automatically edit env or
+restart processes; operator recovery copies must be retained until verification.
+
+Observed live cutover: one existing wrapping version imported, 11 readable
+envelopes verified, and record counts unchanged (5 conversations, 8 messages,
+4 attachments, 2 staff accounts, 5 recipient grants). Twelve pre-existing
+unauthenticated legacy envelopes were preserved unchanged and remain rejected:
+2 subjects, 3 bodies, 3 filenames, 3 file objects, and 1 MFA seed. They require the
+trusted recovery procedure above; no origin authentication was fabricated.
+The restricted local report and rollback backup are under
+`.runtime/custody-backup-20261030-184112/` and are excluded from Git.
+
+Live HTTP verification: unsealed download 200, sealed download 503, all 11
+readable-envelope decryptions rejected when sealed, bulk decrypt rejected, then
+unsealed download 200 with identical bytes and all 11 plaintext hashes unchanged.
+The post-cutover key-store backup passed a restore drill using existing recovery
+custody. Already delivered plaintext and in-flight requests that obtained their
+DEK before sealing cannot be recalled. These local checks do not constitute the
+independent cryptographic review or production off-host custody approval.
+
+## Staff SMTP credentials
+StaffSMTP.password_ciphertext uses the existing authenticated envelope with smtp-credential context bound to organisation and staff ID. Rewrap and custody migration include these records. Sealed key-service operation prevents SMTP credential decryption as well as protected-content access. APIs and audit events expose configuration metadata only.
+
+Evidence bundles and timestamp receipts retain their original authenticated envelopes. Preserve the associated wrapping private-key versions and custody backups; regular DB/attachment rewrapping is not permission to retire archive keys. Evidence metadata and legacy organisation OTP SMTP credentials (no longer used for delivery) are included in envelope migration. See EVIDENCE_ARCHIVE.md.
+
+
+SMTP credential verification, 31 October 2026: personal mailbox passwords are authenticated encrypted envelopes bound to organization and staff identity. The configured remote key service unwraps their data keys; a sealed service refuses new unwraps. Username/email remains routing metadata. SMTP backend close drops its password reference, including on close errors; Python does not guarantee zeroization of immutable strings, and sealing cannot revoke a password already released to an in-flight connection. No plaintext SMTP password is returned by settings APIs. A real disposable key-store regression verifies successful decryption, seal rejection for both notification and OTP paths, and recovery after unseal.

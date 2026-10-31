@@ -63,6 +63,8 @@ docker compose up --build
 
 Open **http://localhost:8080**. Compose runs PostgreSQL 17, Redis, migrations, Gunicorn, Celery worker/beat and a built React frontend. Only loopback port 8080 is published. The local frontend shares the API network namespace so its proxy can reach the development-only setup/mailbox on loopback. Do not reuse this preview topology as production infrastructure.
 
+The initializer creates `COMPOSE_SETUP_TOKEN` and its `SETUP_TOKEN_SHA256` in the ignored root `.env`, alongside the database password. Open that file locally and paste the **COMPOSE_SETUP_TOKEN value** (without surrounding quotes) into the setup form, then create your first `@onesmarter.com` administrator and enroll MFA. Only the hash is passed into the API container; the raw token is not printed or passed to any container. Setup refuses another account after the first staff account exists. Rerunning initialization preserves existing credentials, including an externally configured setup hash; if you supplied that hash yourself, use its matching original token. Keep `.env` private and never share its contents or resolved Compose configuration.
+
 Docker was unavailable on the development host, so the Compose stack is supplied but has not been run here. Its secrets are generated into an ignored `.env`; existing files are preserved. AWS compute, networking, region and managed database/broker choices remain open.
 
 ## Verify

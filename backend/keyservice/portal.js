@@ -75,7 +75,7 @@ element("rotate").addEventListener("submit", (event) => {
     element("new-secret").value = element("confirm-secret").value = "";
     let result;
     try { result = await request("/v1/rotate-root", data); } finally { data.secret = ""; }
-    element("backup-confirm").checked = false; await refresh(); feedback(result.storage_cleanup_complete ? "Root protection rotated and live database cleaned. Preserve old backup recovery material separately." : "Root protection rotated, but live database cleanup is incomplete. Operator maintenance is required; do not repeat rotation. Preserve backup recovery material.");
+    element("backup-confirm").checked = false; await refresh(); feedback("Root protection rotated. Old-root backups are retained. Retrieve the new recovery secret from custody and complete the offline verify-root-recovery restore drill before retiring old backups. Do not repeat rotation." + (result.storage_cleanup_complete ? "" : " Live database cleanup also requires operator maintenance."));
   });
 });
 element("logout").addEventListener("click", () => {

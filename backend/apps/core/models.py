@@ -12,6 +12,11 @@ class Organization(models.Model):
     domain = models.CharField(max_length=253, default="onesmarter.com", unique=True)
 
 
+class AuditSequence(models.Model):
+    organization = models.OneToOneField(Organization, on_delete=models.PROTECT, primary_key=True)
+    value = models.PositiveBigIntegerField(default=0)
+
+
 class StaffUser(AbstractUser):
     organization = models.ForeignKey(Organization, on_delete=models.PROTECT)
     email = models.EmailField(unique=True)
@@ -56,7 +61,7 @@ class Conversation(models.Model):
     mode = models.CharField(max_length=16, default="ordinary")
     protected = models.BooleanField(default=True)
     routing_reason = models.CharField(max_length=40)
-    policy_version = models.CharField(max_length=24, default="2026-10-27-v1")
+    policy_version = models.CharField(max_length=64, default="2026-10-27-v1")
     subject_ciphertext = models.TextField()
     expires_at = models.DateTimeField()
     revoked_at = models.DateTimeField(null=True)
@@ -84,6 +89,16 @@ class RecipientGrant(models.Model):
         ]
 
 
+class RecipientInvitationToken(models.Model):
+    """Previous invitation hashes inherit all access restrictions from their grant."""
+
+    grant = models.ForeignKey(
+        RecipientGrant, on_delete=models.CASCADE, related_name="invitation_tokens"
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+
 class Message(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     conversation = models.ForeignKey(
@@ -96,6 +111,9 @@ class Message(models.Model):
         RecipientGrant, null=True, on_delete=models.PROTECT, related_name="direct_messages"
     )
     body_ciphertext = models.TextField()
+    shared = models.BooleanField(default=False)
+    mail_headers = models.JSONField(default=dict)
+    reply_to_message = models.ForeignKey("self", null=True, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
 
 
@@ -114,7 +132,28 @@ class Attachment(models.Model):
     media_type = models.CharField(max_length=100)
     state = models.CharField(max_length=16, default="pending")
     scan_method = models.CharField(max_length=32, blank=True)
+    sha256 = models.CharField(max_length=64, blank=True)
+    source_metadata_ciphertext = models.TextField(blank=True)
+    evidence_capture = models.ForeignKey("EvidenceCapture", null=True, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
+
+
+class EvidenceCapture(models.Model):
+    """One immutable capture per original submission; delivery copies share it."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT)
+    sha256 = models.CharField(max_length=64)
+    metadata_ciphertext = models.TextField()
+    bundle_sha256 = models.CharField(max_length=64)
+    provenance = models.CharField(max_length=24)
+    created_at = models.DateTimeField(default=timezone.now)
+    timestamp_state = models.CharField(max_length=16, default="pending")
+    timestamp_sha256 = models.CharField(max_length=64, blank=True)
+    timestamp_checked_at = models.DateTimeField(null=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["organization", "-created_at"])]
 
 
 class OTPChallenge(models.Model):
@@ -261,5 +300,59 @@ class WrappingKeyVersion(models.Model):
                 fields=["organization"],
                 condition=models.Q(state="active"),
                 name="one_active_wrapping_key",
+            )
+        ]
+
+
+class OrganizationSMTP(models.Model):
+    organization = models.OneToOneField(Organization, on_delete=models.PROTECT, primary_key=True)
+    host = models.CharField(max_length=253)
+    sender_name = models.CharField(max_length=160, default="OneSmarter Support")
+    port = models.PositiveIntegerField(default=587)
+    security = models.CharField(max_length=12, default="starttls")
+    enabled = models.BooleanField(default=True)
+    revision = models.PositiveIntegerField(default=1)
+    otp_password_ciphertext = models.TextField(blank=True)
+    otp_transport_revision = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class StaffSMTP(models.Model):
+    user = models.OneToOneField(StaffUser, on_delete=models.PROTECT, primary_key=True)
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT)
+    email = models.EmailField()
+    password_ciphertext = models.TextField()
+    transport_revision = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["organization", "email"], name="unique_org_smtp_sender")
+        ]
+
+
+class DirectChat(models.Model):
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT)
+    owner = models.ForeignKey(StaffUser, on_delete=models.PROTECT)
+    recipient_email = models.EmailField()
+    conversation = models.OneToOneField(Conversation, on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "recipient_email"], name="unique_staff_recipient_chat"
+            )
+        ]
+
+
+class GroupChat(models.Model):
+    owner = models.ForeignKey(StaffUser, on_delete=models.PROTECT)
+    participants_hash = models.CharField(max_length=64)
+    conversation = models.OneToOneField(Conversation, on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "participants_hash"], name="unique_staff_group_chat"
             )
         ]

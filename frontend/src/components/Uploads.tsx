@@ -15,6 +15,7 @@ export function Uploads({
   recipient?: boolean;
   onBusy?: (busy: boolean) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const controller = useRef<AbortController | null>(null);
   useEffect(() => () => controller.current?.abort(), []);
   const [progress, setProgress] = useState<
@@ -24,7 +25,7 @@ export function Uploads({
   const [error, setError] = useState("");
   const input = useRef<HTMLInputElement>(null);
   async function upload(selected: FileList | null) {
-    if (!selected?.length) return;
+    if (!selected?.length || busy) return;
     setError("");
     const next = [...files];
     if (
@@ -36,6 +37,7 @@ export function Uploads({
       setError("Choose up to 10 files, 25 MB combined.");
       return;
     }
+
     controller.current = new AbortController();
     setProgress(
       Array.from(selected).map((file) => ({
@@ -87,24 +89,35 @@ export function Uploads({
   }
   return (
     <div className="uploads">
-      <label className="upload-area">
-        <Icon name="file" size={26} />
-        <strong>
-          {busy
-            ? "Uploading and checking files…"
-            : "Choose documents to attach"}
-        </strong>
-        <span>PDF, PNG, JPEG or text · Up to 25 MB combined</span>
-        <input
-          ref={input}
-          type="file"
-          accept=".pdf,.png,.jpg,.jpeg,.txt"
-          multiple
-          disabled={busy}
-          onChange={(e) => void upload(e.target.files)}
-          aria-label="Upload attachments"
-        />
-      </label>
+      <button
+        type="button"
+        className="attachment-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        disabled={busy}
+      >
+        <Icon name="paperclip" size={18} /> Attach files
+      </button>
+      {expanded && (
+        <div className="attachment-controls">
+          <label className="upload-area">
+            <Icon name="file" size={18} />
+            <strong>
+              {busy ? "Uploading and checking files…" : "Attach files"}
+            </strong>
+            <span>PDF, PNG, JPEG or text · Up to 10 files, 25 MB combined</span>
+            <input
+              ref={input}
+              type="file"
+              multiple
+              accept=".pdf,.png,.jpg,.jpeg,.txt"
+              disabled={busy}
+              onChange={(e) => void upload(e.target.files)}
+              aria-label="Upload attachments"
+            />
+          </label>
+        </div>
+      )}
       {busy && (
         <button type="button" onClick={() => controller.current?.abort()}>
           Cancel upload

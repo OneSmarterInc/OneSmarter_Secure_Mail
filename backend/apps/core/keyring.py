@@ -218,7 +218,7 @@ def service() -> Client:
         settings.KEY_SERVICE_CA,
         settings.KEY_SERVICE_CERT,
         settings.KEY_SERVICE_KEY,
-        require_pq=settings.PQ_TRANSPORT_REQUIRED,
+        require_pq=settings.KEY_SERVICE_REQUIRE_PQ,
     )
 
 
@@ -271,7 +271,7 @@ def active_remote(org, *, required=True):
         str(settings.KEY_SERVICE_CERT),
         str(settings.KEY_SERVICE_KEY),
         str(settings.KEY_SERVICE_CA),
-        settings.PQ_TRANSPORT_REQUIRED,
+        settings.KEY_SERVICE_REQUIRE_PQ,
     )
     cached = getattr(_remote_cache, "entry", None)
     # Only public metadata is cached. Every wrap still requires a live service

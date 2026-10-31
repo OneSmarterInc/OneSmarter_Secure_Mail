@@ -196,7 +196,7 @@ Evaluate stored content/key protection, every plaintext-bearing browser/ingress 
 
 ## SMTP integration
 
-Use supported SMTP submission for authorized addresses after account/plan validation. Proton documents token-based sending at `smtp.protonmail.ch:587` with STARTTLS; use certificate verification and server-side secret management. SMTP submission is sending-only and is not end-to-end encrypted. [Official SMTP documentation](https://proton.me/support/smtp-submission).
+Use the organisation-configured TLS SMTP submission server and each owning staff member's encrypted credential. SMTP submission is sending-only and is not end-to-end encrypted. No shared Proton or environment-password fallback is used.
 
 Protected traffic sends generic invitations, codes, and staff notifications only. Eligible normal routes send ordinary message content through the approved transport. No recipient secrets in notification URLs beyond the opaque invitation token. Direct Proton web/mobile composition bypasses this application's policy; no interception API or partnership is assumed.
 
@@ -216,7 +216,7 @@ Verification commands and observed results are in README.md and ROADMAP.md. Back
 
 Tradeoffs: a modular monolith limits operational complexity; server-managed keys simplify recipient access but trust the backend; metadata-first search limits leakage but offers less search functionality; outbox/queue workers improve reliability but need operational monitoring.
 
-Current SMTP selection: Private Email with STARTTLS. Configure EMAIL_HOST_PASSWORD through the private root .env locally or the process environment in deployment. Password-file fallback and legacy profile loading are retired; scripts/with_mail.py delegates to standard Django configuration. Provider-side rotation of the exposed credential remains open. See ENVIRONMENT.md.
+Current SMTP selection: organisation-managed server settings with individual staff credentials entered through Connections. The local common server is smtp.ionos.com:587 with STARTTLS. Provider authentication is pending staff credential entry. See ENVIRONMENT.md.
 
 ## Antivirus implementation update — 2026-10-28
 
@@ -225,3 +225,23 @@ Real ClamAV is the default for uploads; synthetic scanning requires explicit dev
 ## Portal separation and deployment interface - 2026-10-28
 
 Staff and administrators require exact @onesmarter.com accounts. Recipients may use any valid mailbox. Staff enter through /staff/; invitation links enter through /recipient/ and use a separate API namespace and session cookie. Normal user pages no longer display development banners, test-mailbox controls or engineering release requirements. Operator test tools require explicit opt-in. Local captured notifications are explicitly marked not emailed. This supersedes earlier instructions to show development-mode banners on customer pages; deployment status remains documented and enforced on the server. See [DEPLOYMENT.md](DEPLOYMENT.md) for compatibility, configuration and outstanding release blockers.
+
+## Organisation SMTP and secure conversation threads (31 October 2026)
+
+This replaces the earlier shared Proton/Private Email sender configuration and the earlier separate-copy rule for To/Cc recipients.
+
+- Administrators configure the organisation SMTP hostname, verified TLS submission mode (STARTTLS/587 or TLS/465), enabled state, and sender display name in Connections. Staff save their own approved SMTP email and password there. From and Reply-To use that same staff email; the application never falls back to a shared provider credential. The chosen local transport is smtp.ionos.com:587 with STARTTLS and display name OneSmarter Support. Real authentication requires each staff member's provider-supported credential; it has not been verified by automated tests.
+- SMTP passwords are encrypted using the existing document encryption/key-service boundary, bound to organisation and staff identity. They are write-only in APIs, excluded from audits, and included in key migration. Admin transport changes require staff to re-enter credentials before sending to the changed destination. SMTP connections reject private/reserved network destinations and verify TLS certificates.
+- Single-recipient protected sends continue the existing owner-recipient chat. Multiple visible To/Cc recipients share a separate thread, reused for the same owner and visible participant set. Each BCC recipient receives a private copy in their own chat. BCC identities are never returned to other recipients. Adding/removing visible participants starts a different group thread; it does not reveal old group history.
+- Messages display author, date, and expandable From/To/Cc details. A BCC viewer sees only their own BCC status; the owning staff can see the BCC metadata on their original sent message. Reply to sender is private to that message's author. Reply all reaches the owning staff and visible To/Cc participants; BCC copies cannot Reply all. Private recipient-to-recipient replies are hidden from other participants, including staff, by API and attachment authorization.
+- Notifications contain a generic secure-message notice and portal button, never the confidential subject/body/files. The recipient verifies their own mailbox using OTP. Recipient portal replies notify the staff owner when the owner is a recipient of that reply. Ordinary incoming email is not imported; notifications instruct recipients to reply in the portal.
+- Existing ciphertext and conversation identifiers are preserved. Historical group threads are not merged or reparented. New direct-chat mappings can adopt eligible existing private threads; unauthenticated legacy ciphertext remains subject to the existing migration gate.
+- Nophi remains a separately authorized ordinary-email option. These group-thread and private-copy rules apply to protected portal traffic.
+
+## Local evidence preservation and OTP sender update — 31 October 2026
+
+See [EVIDENCE_ARCHIVE.md](EVIDENCE_ARCHIVE.md) for the implemented capture catalog, original-file hashes, server-download provenance, encrypted create-only local bundles, verified exports, legacy backfill and optional RFC 3161 verification. The user selected local preservation for now and an unset TSA. Deployment must not silently switch to AWS. Local preservation is not administrator-proof cloud WORM; pending timestamps are not trusted timestamps. Hospital-list reconciliation is excluded.
+
+Emailed recipient OTP challenges authenticate through the organisation SMTP transport using the conversation owner's encrypted staff SMTP username and password. Only the From/envelope sender is support@onesmarter.com; Reply-To remains the staff address. No separate support password is required. The provider must authorize each staff account to send as support@onesmarter.com; rejected delivery fails closed without a sender fallback. Missing staff credentials block OTP delivery. Staff authenticator TOTP is unchanged. Ordinary conversation notifications retain each owning staff member's SMTP sender.
+
+Local key-service calls now prefer the IPv4 loopback listener while retaining localhost certificate verification and PQ requirements. Every wrap/unwrap still contacts the service; no plaintext, data keys or readiness result is cached to achieve the speedup. Initial workspace session checks time out after eight seconds with retry; authenticated drafts survive transient polling failures.

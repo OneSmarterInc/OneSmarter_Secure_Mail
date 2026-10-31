@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -8,6 +9,59 @@ from backend.apps.core import storage
 from backend.apps.core.http import Problem
 from backend.apps.core.models import Attachment
 from backend.tests.test_readiness import ScannerSocket
+
+
+def test_pq_scanner_preserves_baseline_security_policy():
+    deploy = Path(__file__).resolve().parents[2] / "deploy"
+
+    def configuration(name):
+        return dict(
+            line.split(maxsplit=1)
+            for raw in (deploy / name).read_text().splitlines()
+            if (line := raw.strip()) and not line.startswith("#")
+        )
+
+    baseline = configuration("clamd.conf")
+    local = configuration("clamd-local.conf")
+    assert local["AlertExceedsMax"] == local["AlertEncrypted"] == "yes"
+    assert local["User"] == "clamav"
+    for setting in (
+        "StreamMaxLength",
+        "MaxFileSize",
+        "MaxScanSize",
+        "MaxRecursion",
+        "MaxFiles",
+        "MaxScanTime",
+        "ReadTimeout",
+        "CommandReadTimeout",
+        "MaxThreads",
+        "MaxQueue",
+        "SelfCheck",
+        "LogClean",
+    ):
+        assert local[setting] == baseline[setting], setting
+    assert local["LocalSocketMode"] == "660"
+    assert "TCPSocket" not in local
+
+
+@pytest.mark.parametrize(
+    "signature", ["Heuristics.Encrypted.PDF", "Heuristics.Limits.Exceeded.MaxScanSize"]
+)
+@pytest.mark.django_db
+def test_unscannable_upload_is_not_stored(staff_client, settings, monkeypatch, signature):
+    settings.SCAN_PROVIDER = "clamav"
+    monkeypatch.setattr(storage, "scanner_health", lambda: {})
+    monkeypatch.setattr(
+        storage,
+        "scanner_connection",
+        lambda: ScannerSocket(f"stream: {signature} FOUND\0".encode()),
+    )
+    response = staff_client.post(
+        "/api/attachments", {"file": SimpleUploadedFile("sample.txt", b"synthetic scan fixture")}
+    )
+    assert response.status_code == 400
+    assert not Attachment.objects.exists()
+    assert not (settings.RUNTIME_DIR / "objects").exists()
 
 
 def version_response(age_hours):

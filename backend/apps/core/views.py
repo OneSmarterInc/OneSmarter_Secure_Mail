@@ -4,7 +4,7 @@ from django.db.models import Count
 from django.utils import timezone
 from rest_framework.response import Response
 
-from . import document_service, senders, storage
+from . import document_service, smtp_settings, storage
 from .auth import recent_mfa
 from .http import Problem, endpoint, unavailable
 from .mail import payload
@@ -65,7 +65,7 @@ def connection_settings(request):
             "mail": settings.MAIL_PROVIDER,
             "storage": settings.STORAGE_PROVIDER,
             "scanner": settings.SCAN_PROVIDER,
-            "smtp_configured": senders.configured(settings.DEFAULT_FROM_EMAIL),
+            "smtp_configured": smtp_settings.configured(request.user),
             "archive_configured": bool(settings.AUDIT_BUCKET),
             "crypto": settings.CRYPTO_PROVIDER,
             "document_encryption": "AES-256-GCM"

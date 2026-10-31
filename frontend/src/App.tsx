@@ -1,6 +1,7 @@
 import {
   Component,
   useEffect,
+  useRef,
   useState,
   type ErrorInfo,
   type ReactNode,
@@ -19,6 +20,7 @@ import {
 import { Auth } from "./pages/Auth";
 import { Compose, MailDetail, MailList } from "./pages/Mail";
 import { Accounts, AuditLogs } from "./pages/Access";
+import { EvidenceCatalog } from "./pages/EvidenceCatalog";
 import { Connections } from "./pages/Connections";
 import { Recipient } from "./pages/Recipient";
 
@@ -179,6 +181,10 @@ function Application() {
   );
   const [session, setSession] = useState<Session | null>(null);
   const [error, setError] = useState("");
+  const [sessionError, setSessionError] = useState("");
+  const [sessionRetry, setSessionRetry] = useState(0);
+  const [sessionChecking, setSessionChecking] = useState(false);
+  const sessionEpoch = useRef(0);
   useEffect(() => {
     if (!recipientPortal && route.startsWith("/invite/")) {
       window.location.replace(`/recipient/${window.location.hash}`);
@@ -191,21 +197,52 @@ function Application() {
   }, []);
   useEffect(() => {
     let active = true;
+    let pending = false;
+    const controller = new AbortController();
     async function refresh() {
+      if (pending) return;
+      pending = true;
+      const epoch = sessionEpoch.current;
+      setSessionChecking(true);
       try {
-        const state = await api<Session>("/auth/session");
-        if (active) {
+        const state = await api<Session>("/auth/session", {
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(8000),
+          ]),
+        });
+        if (active && epoch === sessionEpoch.current) {
           setSession(state);
-          setError("");
+          setSessionError("");
         }
       } catch (err) {
-        if (active) {
-          setError((err as Error).message);
-          setSession(null);
+        if (active && epoch === sessionEpoch.current) {
+          // Retain the last confirmed session and mounted drafts on transient
+          // failures. A 401 emits session-expired and clears authentication.
+          setSessionError(
+            err instanceof DOMException && err.name === "TimeoutError"
+              ? "Session check timed out. Please try again."
+              : (err as Error).message,
+          );
         }
+      } finally {
+        pending = false;
+        if (active) setSessionChecking(false);
       }
     }
-    const expired = () => setSession((s) => (s ? { ...s, user: null } : s));
+    const expired = () => {
+      sessionEpoch.current++;
+      setSession((s) => ({
+        ...(s ?? {
+          csrf: "",
+          synthetic_mode: false,
+          dev_tools: false,
+          setup_required: false,
+        }),
+        user: null,
+      }));
+      setSessionError("");
+    };
     const focus = () => {
       if (document.visibilityState === "visible") void refresh();
     };
@@ -215,19 +252,23 @@ function Application() {
     document.addEventListener("visibilitychange", focus);
     return () => {
       active = false;
+      controller.abort();
       clearInterval(timer);
       window.removeEventListener("session-expired", expired);
       document.removeEventListener("visibilitychange", focus);
     };
-  }, []);
+  }, [sessionRetry]);
   async function signedIn(user: User) {
+    sessionEpoch.current++;
     const fresh = await api<Session>("/auth/session");
     setSession({ ...fresh, user });
+    setSessionError("");
     window.location.hash = "/messages";
   }
   async function signOut() {
     try {
       await post("/auth/logout");
+      sessionEpoch.current++;
       setSession((s) => (s ? { ...s, user: null } : s));
       window.location.hash = "/messages";
     } catch (err) {
@@ -238,11 +279,16 @@ function Application() {
     return (
       <main className="fatal-error">
         <Brand />
-        {error ? (
+        {sessionError ? (
           <>
-            <ErrorNotice message={error} />
-            <p>Check that the API is running, then reload.</p>
-            <button onClick={() => window.location.reload()}>Try again</button>
+            <ErrorNotice message={sessionError} />
+            <p>Unable to check your session. Please try again.</p>
+            <button
+              disabled={sessionChecking}
+              onClick={() => setSessionRetry((value) => value + 1)}
+            >
+              Try again
+            </button>
           </>
         ) : (
           <Loading />
@@ -295,9 +341,10 @@ function Application() {
   let page: ReactNode;
   if (path === "/messages" || path === "/") page = <MailList />;
   else if (path === "/compose" || path === "/request")
-    page = <Compose key={path} user={user} requestMode={path === "/request"} />;
+    page = <Compose user={user} />;
   else if (path.startsWith("/messages/"))
     page = <MailDetail key={path} id={path.slice("/messages/".length)} />;
+  else if (path === "/evidence") page = <EvidenceCatalog />;
   else if (path === "/settings") page = <Connections />;
   else if (admin && user.role !== "admin")
     page = (
@@ -336,29 +383,43 @@ function Application() {
       <div className="app-layout">
         <aside className="sidebar">
           <Brand />
-          <div className="workspace-label">
-            {user.organization}
-            <Badge>Workspace</Badge>
-          </div>
+          <div className="workspace-label">{user.organization}</div>
           <nav className="main-navigation" aria-label="Main navigation">
             <a
               href="#/messages"
               className={path.startsWith("/messages") ? "active" : ""}
+              aria-current={path.startsWith("/messages") ? "page" : undefined}
             >
               <Icon name="mail" />
               Conversations
             </a>
-            <a href="#/request" className={path === "/request" ? "active" : ""}>
-              <Icon name="shield" />
-              Request information
-            </a>
-            <a href="#/compose" className={path === "/compose" ? "active" : ""}>
+            <a
+              href="#/compose"
+              className={
+                path === "/compose" || path === "/request" ? "active" : ""
+              }
+              aria-current={
+                path === "/compose" || path === "/request" ? "page" : undefined
+              }
+            >
               <Icon name="plus" />
-              Send message or files
+              New conversation
+            </a>
+            <a
+              href="#/evidence"
+              className={path === "/evidence" ? "active" : ""}
+              aria-current={path === "/evidence" ? "page" : undefined}
+            >
+              <Icon name="file" />
+              Archive
             </a>
             <span className="nav-divider" />
             {user.role === "admin" && (
-              <a href="#/access/accounts" className={admin ? "active" : ""}>
+              <a
+                href="#/access/accounts"
+                className={admin ? "active" : ""}
+                aria-current={admin ? "page" : undefined}
+              >
                 <Icon name="users" />
                 Access<Badge>Admin</Badge>
               </a>
@@ -366,6 +427,7 @@ function Application() {
             <a
               href="#/settings"
               className={path === "/settings" ? "active" : ""}
+              aria-current={path === "/settings" ? "page" : undefined}
             >
               <Icon name="settings" />
               Connections
@@ -373,8 +435,7 @@ function Application() {
           </nav>
           <div className="sidebar-note">
             <Icon name="lock" />
-            <strong>Access stays intentional.</strong>
-            <p>Only assigned conversations appear in your workspace.</p>
+            <span>Private staff workspace</span>
           </div>
           <div className="profile">
             <span className="avatar small">
@@ -395,17 +456,30 @@ function Application() {
         </aside>
         <div className="workspace">
           <header className="topbar">
-            <span>
-              OneSmarter <span className="breadcrumb-slash">/</span>{" "}
-              {admin
-                ? "Access"
-                : path === "/settings"
-                  ? "Connections"
-                  : "Secure Mail"}
-            </span>
-            <span className="verified-session">
-              <span />
-              MFA verified session
+            <nav className="workspace-breadcrumb" aria-label="Breadcrumb">
+              <a href="#/messages">OneSmarter</a>
+              <span aria-hidden="true">/</span>
+              <strong aria-current="page">
+                {admin
+                  ? "Access"
+                  : path === "/settings"
+                    ? "Connections"
+                    : path === "/request"
+                      ? "New conversation"
+                      : path === "/compose"
+                        ? "New conversation"
+                        : path === "/evidence"
+                          ? "Archive"
+                          : "Conversations"}
+              </strong>
+            </nav>
+            <span
+              className={`verified-session ${sessionError ? "session-warning" : ""}`}
+            >
+              <Icon name={sessionError ? "clock" : "shield"} size={14} />
+              {sessionError
+                ? "Session check unavailable"
+                : "MFA verified session"}
             </span>
             <button className="mobile-signout" onClick={() => void signOut()}>
               Sign out
@@ -413,11 +487,27 @@ function Application() {
           </header>
           <main className="main-content" id="main-content" tabIndex={-1}>
             <ErrorNotice message={error} />
+            {sessionError && (
+              <div className="notice warning" role="status">
+                <p>
+                  Unable to check your session. Your work remains on this page.
+                  We’ll retry automatically.
+                </p>
+                <button
+                  disabled={sessionChecking}
+                  onClick={() => setSessionRetry((value) => value + 1)}
+                >
+                  {sessionChecking
+                    ? "Checking session…"
+                    : "Retry session check"}
+                </button>
+              </div>
+            )}
             {page}
           </main>
           <footer className="workspace-footer">
             OneSmarter Secure Mail
-            <span>Permission-controlled communication</span>
+            <span>Only your assigned conversations are visible</span>
           </footer>
         </div>
       </div>

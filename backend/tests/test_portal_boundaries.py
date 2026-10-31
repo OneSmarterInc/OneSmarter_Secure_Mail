@@ -1,11 +1,13 @@
 import json
+from datetime import timedelta
 
 import pytest
 from django.test import Client
+from django.utils import timezone
 
 from backend.apps.core.mail import payload
 from backend.apps.core.models import Conversation, DeliveryJob, StaffUser
-from backend.tests.test_flows import compose
+from backend.tests.test_flows import compose, post
 
 pytestmark = pytest.mark.django_db
 
@@ -68,3 +70,71 @@ def test_legacy_recipient_api_disabled_by_default(settings):
     settings.ENABLE_LEGACY_RECIPIENT_API = False
     assert Client().post("/api/recipient/code", {}).status_code == 404
     assert Client().get("/recipient-api/auth/session").status_code == 200
+
+
+@pytest.mark.parametrize("restriction", ["grant", "conversation", "expiry", "owner"])
+def test_original_invite_survives_replies_but_not_access_revocation(staff_client, restriction):
+    created = compose(staff_client)
+    conversation = Conversation.objects.get(pk=created.json()["id"])
+    grant = conversation.grants.get()
+    original = payload(DeliveryJob.objects.get(conversation=conversation))["link"].rsplit("/", 1)[
+        -1
+    ]
+    tokens = [original]
+    for index in range(2):
+        assert (
+            post(
+                staff_client,
+                f"/conversations/{conversation.pk}/messages",
+                {"body": f"Reply {index}"},
+                key=f"reply-history-{index}",
+            ).status_code
+            == 201
+        )
+        latest = DeliveryJob.objects.filter(conversation=conversation).latest("created_at")
+        tokens.append(payload(latest)["link"].rsplit("/", 1)[-1])
+        count = DeliveryJob.objects.filter(conversation=conversation).count()
+        assert (
+            post(
+                staff_client,
+                f"/conversations/{conversation.pk}/messages",
+                {"body": f"Reply {index}"},
+                key=f"reply-history-{index}",
+            ).status_code
+            == 201
+        )
+        assert DeliveryJob.objects.filter(conversation=conversation).count() == count
+    assert len(set(tokens)) == 3
+    assert grant.invitation_tokens.count() == 2
+    # A fresh browser has no session fallback: it must resolve the original hash.
+    visitor = Client()
+    for token in tokens:
+        assert (
+            send(visitor, "/recipient-api/recipient/landing", {"token": token}).status_code == 200
+        )
+    assert send(visitor, "/recipient-api/recipient/code", {"token": original}).status_code == 200
+    code_job = DeliveryJob.objects.filter(conversation=conversation).latest("created_at")
+    code = payload(code_job)["body"].split(" is ")[1][:6]
+    assert (
+        send(
+            visitor, "/recipient-api/recipient/verify", {"token": original, "code": code}
+        ).status_code
+        == 200
+    )
+    assert visitor.get("/recipient-api/recipient/conversation").status_code == 200
+    if restriction == "grant":
+        grant.revoked_at = timezone.now()
+        grant.save(update_fields=["revoked_at"])
+    elif restriction == "conversation":
+        conversation.revoked_at = timezone.now()
+        conversation.save(update_fields=["revoked_at"])
+    elif restriction == "expiry":
+        conversation.expires_at = timezone.now() - timedelta(seconds=1)
+        conversation.save(update_fields=["expires_at"])
+    else:
+        conversation.owner.status = "deactivated"
+        conversation.owner.save(update_fields=["status"])
+    for token in tokens:
+        fresh = Client()
+        assert send(fresh, "/recipient-api/recipient/landing", {"token": token}).status_code == 404
+        assert send(fresh, "/recipient-api/recipient/code", {"token": token}).status_code == 404

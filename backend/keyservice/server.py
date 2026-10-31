@@ -5,8 +5,10 @@ Certificate allowlists are reread per request so revocation needs no restart.
 """
 
 import hashlib
+import ipaddress
 import logging
 import secrets
+import select
 import ssl
 import threading
 import time
@@ -25,7 +27,7 @@ from backend.transport import tls as transport_tls
 
 from . import protocol as p
 from .ownership import StoreOwnership
-from .store import ConflictError, KeyStore, SealedError
+from .store import ConflictError, KeyStore, SealedError, require_synthetic_import
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +204,7 @@ class Service:
         if op == "rotate":
             return self.store.rotate(org, data["expected"], data["request_id"], actor)
         if op == "import":
+            require_synthetic_import()
             return self.store.import_version(
                 org, data["key_id"], p.decode(data["private"], 96), actor
             )
@@ -262,8 +265,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/unwrap-batch":
             service.throttle("bulk:" + fp, 120)
         else:
-            service.throttle("all-peers", 3000)
+            # A peer rejected at its own cap must not consume shared capacity.
             service.throttle("peer:" + fp, 600)
+            service.throttle("all-peers", 3000)
         return fp, identity
 
     def do_GET(self):
@@ -383,6 +387,10 @@ class Server(ThreadingMixIn, HTTPServer):
         self.require_pq = require_pq
         transport_tls.configure(tls, required=require_pq)
         self.slots = threading.BoundedSemaphore(16)
+        self.connection_lock = threading.Lock()
+        self.connections_by_ip: dict[str, int] = {}
+        self.handshake_deadline_seconds = 2.0
+        self.connections_per_ip = 4
         self.ownership = StoreOwnership(service.store.path)
         try:
             super().__init__(address, Handler)
@@ -402,21 +410,67 @@ class Server(ThreadingMixIn, HTTPServer):
             self.ownership.close()
 
     def process_request(self, request, client_address):
-        if not self.slots.acquire(blocking=False):
+        address = ipaddress.ip_address(client_address[0])
+        peer = str(address.ipv4_mapped or address) if address.version == 6 else str(address)
+        deadline = time.monotonic() + self.handshake_deadline_seconds
+        with self.connection_lock:
+            admitted = self.connections_by_ip.get(
+                peer, 0
+            ) < self.connections_per_ip and self.slots.acquire(blocking=False)
+            if admitted:
+                self.connections_by_ip[peer] = self.connections_by_ip.get(peer, 0) + 1
+        if not admitted:
             request.close()
             return
-        super().process_request(request, client_address)
+        try:
+            # Carry admission metadata into the worker, including scheduling time.
+            super().process_request(request, (client_address, peer, deadline))
+        except BaseException:
+            request.close()
+            self.release_connection(peer)
+            raise
+
+    def release_connection(self, peer):
+        with self.connection_lock:
+            remaining = self.connections_by_ip[peer] - 1
+            if remaining:
+                self.connections_by_ip[peer] = remaining
+            else:
+                del self.connections_by_ip[peer]
+            self.slots.release()
+
+    def handshake(self, request, deadline):
+        request.setblocking(False)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("TLS handshake deadline exceeded")
+            try:
+                request.do_handshake()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("TLS handshake deadline exceeded")
+                return
+            except ssl.SSLWantReadError:
+                readable, writable = [request], []
+            except ssl.SSLWantWriteError:
+                readable, writable = [], [request]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not any(select.select(readable, writable, [], remaining)[:2]):
+                raise TimeoutError("TLS handshake deadline exceeded")
 
     def process_request_thread(self, request, client_address):
+        original_address, peer, deadline = client_address
         try:
-            request.settimeout(10)
-            request = self.tls.wrap_socket(request, server_side=True)
+            request = self.tls.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+            self.handshake(request, deadline)
             transport_tls.verify(request, required=self.require_pq)
-            super().process_request_thread(request, client_address)
+            request.settimeout(10)
+            super().process_request_thread(request, original_address)
         except (OSError, ssl.SSLError):
             request.close()
         finally:
-            self.slots.release()
+            request.close()
+            self.release_connection(peer)
 
 
 def tls_context(cert: str, key: str, ca: str) -> ssl.SSLContext:

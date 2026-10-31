@@ -88,7 +88,7 @@ def test_smtp_connect_failure_vs_submission_ambiguity(
     connection = Mock()
     if not during_send:
         connection.open.side_effect = ConnectionRefusedError()
-    monkeypatch.setattr(mail.senders, "connection", lambda sender: connection)
+    monkeypatch.setattr(mail.smtp_settings, "connection", lambda user: (user.email, connection))
     send = Mock(side_effect=ConnectionResetError())
     monkeypatch.setattr(mail.EmailMultiAlternatives, "send", send)
     job = DeliveryJob.objects.get()

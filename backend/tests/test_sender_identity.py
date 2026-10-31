@@ -1,3 +1,5 @@
+from email.utils import parseaddr
+
 import pytest
 from django.core import mail
 
@@ -35,9 +37,7 @@ def test_missing_credential_has_no_global_fallback(sender_profile, settings, mon
 
 
 @pytest.mark.django_db
-def test_foreign_notification_sender_never_reaches_transport(
-    staff_client, sender_profile, settings, monkeypatch
-):
+def test_global_notification_sender_is_ignored(staff_client, sender_profile, settings, monkeypatch):
     compose(staff_client)
     settings.DEFAULT_FROM_EMAIL = "info@kormic.ai"
     calls = []
@@ -45,7 +45,8 @@ def test_foreign_notification_sender_never_reaches_transport(
     job = DeliveryJob.objects.get()
     process_job(job.pk)
     job.refresh_from_db()
-    assert job.state == "failed" and job.error_code == "sender_not_configured"
+    assert job.state == "provider_accepted"
+    assert parseaddr(mail.outbox[-1].from_email)[1] == "staff@onesmarter.com"
     assert not calls
 
 
@@ -92,4 +93,4 @@ def test_normal_mail_uses_approved_sender(staff_client, staff, sender_profile):
     process_job(job.pk)
     job.refresh_from_db()
     assert job.state == "provider_accepted"
-    assert mail.outbox[0].from_email == "staff@onesmarter.com"
+    assert parseaddr(mail.outbox[0].from_email)[1] == "staff@onesmarter.com"

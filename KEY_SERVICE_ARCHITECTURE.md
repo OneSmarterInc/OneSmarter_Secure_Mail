@@ -87,6 +87,8 @@ Rewrapping preserves the DEK, content nonce and content ciphertext. Generate and
 
 Root rotation is separate from organization-key rotation. It changes protection of persistent private material. Use staged, verified, resumable migration with a tested rollback/recovery path; never overwrite the only root or delete old material before retained backups are recoverable. Rewrapping does not repair historical copies already exposed with compromised keys.
 
+The implemented recovery gate persists across restarts: rotation retains old-root snapshots and prevents another root rotation. The offline `verify-root-recovery` command must unseal with the saved new secret and successfully restore a fresh encrypted backup before committed old-root snapshots are retired. Pending snapshots require separate reconciliation. See the exact custody and restart procedure in KEY_SERVICE_OPERATIONS.md.
+
 Back up object versions, metadata, encrypted private material, manifests, required formats/dependencies and custody recovery information. Keep recovery authority separately protected. Test isolated restore with actual selected custody hardware or custodian quorum, missing/incorrect shares, damaged backups and service restarts. RTO/RPO and acceptable manual-unlock delay remain open.
 
 Committed visitor files have no automatic age-based deletion; storage and key lifecycle must preserve their readability independently of sessions. See [DATA_RETENTION.md](DATA_RETENTION.md).

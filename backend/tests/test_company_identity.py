@@ -1,4 +1,5 @@
 import json
+from email.utils import parseaddr
 
 import pytest
 from django.core import mail as django_mail
@@ -55,7 +56,7 @@ def test_exception_staff_session_and_sender(staff_client, staff):
 
 
 @pytest.mark.django_db
-def test_notification_uses_exact_profile(org, sender_profile, settings):
+def test_notification_uses_staff_profile_not_global(org, sender_profile, settings, staff):
     settings.DEFAULT_FROM_EMAIL = "info@kormic.ai"
     sender_profile["info@kormic.ai"] = {
         **sender_profile["secure@onesmarter.com"],
@@ -64,12 +65,14 @@ def test_notification_uses_exact_profile(org, sender_profile, settings):
     from pathlib import Path
 
     Path(settings.SMTP_SENDER_PROFILES_FILE).write_text(json.dumps(sender_profile))
-    job = queue_mail(org, {"to": "test@example.test", "subject": "SMTP test", "body": "Fixture"})
+    job = queue_mail(
+        org, {"to": "test@example.test", "subject": "SMTP test", "body": "Fixture"}, actor=staff
+    )
     mail.process_job(job.pk)
     job.refresh_from_db()
     assert job.state == "provider_accepted"
     assert job.payload_ciphertext == ""
-    assert django_mail.outbox[-1].from_email == "info@kormic.ai"
+    assert parseaddr(django_mail.outbox[-1].from_email)[1] == staff.email
     assert django_mail.outbox[-1].alternatives
     with pytest.raises(senders.SenderUnavailable):
         senders.profile("other@kormic.ai")

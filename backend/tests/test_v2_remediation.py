@@ -8,6 +8,7 @@ from datetime import timedelta
 from unittest.mock import Mock
 
 import pytest
+from cryptography.exceptions import InvalidTag
 from django.utils import timezone
 
 from backend.apps.core import crypto, keyring, mail
@@ -33,7 +34,7 @@ def test_reject_weak_new_recovery_secret(secret):
         validate_new_secret(secret)
 
 
-def test_root_rotation_retires_managed_old_snapshots(tmp_path):
+def test_root_rotation_retains_backups_until_verified_recovery(tmp_path, monkeypatch):
     old, new = secrets.token_bytes(32), secrets.token_bytes(32)
     store = KeyStore.initialize(
         tmp_path / "store.sqlite3", old, backup_directory=tmp_path / "backups"
@@ -45,16 +46,52 @@ def test_root_rotation_retires_managed_old_snapshots(tmp_path):
     dek = secrets.token_bytes(32)
     wrapper = store.wrap(org, context, dek, version["id"], "app")
     old_paths = set(store.backup_directory.glob("*.sqlite3"))
+    pending = store.backup_directory / f"1-{uuid.uuid4()}.pending"
+    pending.write_bytes(b"Unreconciled snapshot must be retained")
     result = store.rotate_root(new, store.root_id, "custodian")
-    assert result["snapshot_cleanup_complete"]
+    assert not result["snapshot_cleanup_complete"]
+    assert result["recovery_verification_required"]
+    assert all(path.exists() for path in old_paths)
+    # More checkpoints cannot prune old recovery material while proof is pending.
+    for _ in range(4):
+        version = store.rotate(org, version["id"], str(uuid.uuid4()), "maintenance")
+    assert all(path.exists() for path in old_paths)
+    root_id = store.root_id
+    with pytest.raises(ValueError, match="previous root rotation"):
+        store.rotate_root(secrets.token_bytes(32), root_id, "custodian")
+    store.seal("restart")
+    store = KeyStore(store.path, store.backup_directory)
+    from backend.keyservice.ownership import StoreOwnership
+
+    owner = StoreOwnership(store.path)
+    try:
+        with pytest.raises(ValueError, match="Another key service owns"):
+            store.verify_root_recovery(new, root_id, tmp_path / "busy.sqlite3", "custodian")
+    finally:
+        owner.close()
+    assert all(path.exists() for path in old_paths)
+    with pytest.raises(ValueError, match="Root changed"):
+        store.verify_root_recovery(new, str(uuid.uuid4()), tmp_path / "stale.sqlite3", "custodian")
+    assert store.custody_status()["sealed"]
+    with pytest.raises(InvalidTag):
+        store.verify_root_recovery(old, root_id, tmp_path / "wrong.sqlite3", "custodian")
+    assert all(path.exists() for path in old_paths)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            KeyStore, "restore", lambda *args: (_ for _ in ()).throw(OSError("Restore failed"))
+        )
+        with pytest.raises(OSError, match="Restore failed"):
+            store.verify_root_recovery(new, root_id, tmp_path / "failed.sqlite3", "custodian")
+    assert all(path.exists() for path in old_paths)
+    assert store.custody_status()["recovery_verification_required"]
+    result = store.verify_root_recovery(new, root_id, tmp_path / "restored.sqlite3", "custodian")
+    assert result["retired_snapshots"] > 0
     assert not any(path.exists() for path in old_paths)
-    snapshots = list(store.backup_directory.glob("*.sqlite3"))
-    assert len(snapshots) == 1
-    restored = KeyStore.restore(snapshots[0], tmp_path / "restored.sqlite3", new)
+    assert pending.exists()
+    assert not store.custody_status()["recovery_verification_required"]
+    restored = KeyStore(tmp_path / "restored.sqlite3")
     restored.unseal(new, "custodian")
     assert restored.unwrap(org, context, wrapper, "app") == dek
-    with pytest.raises(Exception):
-        KeyStore.restore(snapshots[0], tmp_path / "wrong.sqlite3", old)
 
 
 def test_mfa_replay_ledger_is_outside_application_storage(tmp_path):
@@ -133,7 +170,7 @@ def test_legacy_migration_does_not_block_other_records(staff_client, org):
 @pytest.mark.django_db
 def test_smtp_all_recipients_refused_is_definite_failure(staff_client, sender_profile, monkeypatch):
     compose(staff_client)
-    monkeypatch.setattr(mail.senders, "connection", lambda sender: Mock())
+    monkeypatch.setattr(mail.smtp_settings, "connection", lambda user: (user.email, Mock()))
     monkeypatch.setattr(
         mail.EmailMultiAlternatives,
         "send",
@@ -178,14 +215,14 @@ def test_bulk_crypto_request_count_and_no_cross_request_cache(org, settings, mon
 
 
 @pytest.mark.django_db
-def test_account_failure_budget_does_not_lock_out_correct_password(client, staff, monkeypatch):
+def test_account_login_budget_applies_before_password_check(client, staff, monkeypatch):
     monkeypatch.setattr("backend.apps.core.auth.authenticate", lambda *a, **kw: None)
     data = {"email": staff.email, "password": "incorrect-test-password"}
     for _ in range(10):
         assert post(client, "/auth/login", data).status_code == 401
     assert post(client, "/auth/login", data).status_code == 429
     monkeypatch.setattr("backend.apps.core.auth.authenticate", lambda *a, **kw: staff)
-    assert post(client, "/auth/login", data).status_code == 200
+    assert post(client, "/auth/login", data).status_code == 429
 
 
 def test_no_implicit_backup_and_rollback_does_not_publish(tmp_path):
@@ -242,6 +279,64 @@ def test_revoked_peer_cannot_charge_authorized_budgets():
     with pytest.raises(PermissionError):
         handler.peer()
     service.throttle.assert_not_called()
+
+
+def test_peer_throttle_rejections_preserve_global_custodian_capacity(tmp_path, monkeypatch):
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    from backend.keyservice.server import Handler, Service
+
+    now = 1000.0
+    monkeypatch.setattr("backend.keyservice.server.time.monotonic", lambda: now)
+    certificates = {"workload": b"workload-certificate", "custodian": b"custodian-certificate"}
+    policy = tmp_path / "policy.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "identities": {
+                    hashlib.sha256(cert).hexdigest(): {
+                        "name": name,
+                        "role": name,
+                        "expires_at": 9999999999,
+                    }
+                    for name, cert in certificates.items()
+                }
+            }
+        )
+    )
+    service = Service(Mock(), policy, "https://localhost")
+
+    def peer(name, path):
+        handler = object.__new__(Handler)
+        handler.server = Mock(service=service)
+        handler.connection = Mock()
+        handler.connection.getpeercert.return_value = certificates[name]
+        handler.path = path
+        return handler.peer()
+
+    for _ in range(600):
+        peer("workload", "/v1/unwrap")
+    assert service.rates["all-peers"][1] == 600
+
+    def rejected(_):
+        with pytest.raises(PermissionError, match="Rate limit exceeded"):
+            peer("workload", "/v1/unwrap")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(rejected, range(3100)))
+    assert service.rates["all-peers"][1] == 600
+    for path in ("/v1/login", "/v1/unseal"):
+        assert peer("custodian", path)[1]["role"] == "custodian"
+    assert service.rates["all-peers"][1] == 602
+    # The shared ceiling still rejects admitted peers when genuinely full.
+    service.rates["all-peers"] = (now, 3000)
+    with pytest.raises(PermissionError, match="Rate limit exceeded"):
+        peer("custodian", "/v1/unseal")
+    assert service.rates["all-peers"][1] == 3000
+    now += 60
+    peer("workload", "/v1/unwrap")
+    assert service.rates["all-peers"][1] == 1
 
 
 def test_denial_final_window_retains_identity(tmp_path):

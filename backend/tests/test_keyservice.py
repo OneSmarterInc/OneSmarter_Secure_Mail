@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import secrets
+import socket
 import ssl
 import subprocess
 import threading
@@ -316,6 +317,7 @@ def live_service(vault, tmp_path, settings):
         "port": server.server_port,
         "policy": policy,
         "service": service,
+        "server": server,
         "require_pq": require_pq,
     }
     server.shutdown()
@@ -331,6 +333,80 @@ def client(live, role):
         str(live["certs"][role][1]),
         require_pq=live["require_pq"],
     )
+
+
+def wait_for_connections(server, peer, count, timeout=3):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with server.connection_lock:
+            if server.connections_by_ip.get(peer, 0) == count:
+                return
+        time.sleep(0.01)
+    raise AssertionError("Connection admission count did not settle")
+
+
+def test_idle_handshakes_are_limited_per_ip_and_release_slots(live_service):
+    live = live_service
+    server = live["server"]
+    sockets = []
+    try:
+        for _ in range(4):
+            sockets.append(socket.create_connection(("127.0.0.1", live["port"])))
+        wait_for_connections(server, "127.0.0.1", 4)
+        extra = socket.create_connection(("127.0.0.1", live["port"]))
+        sockets.append(extra)
+        extra.settimeout(1)
+        try:
+            assert extra.recv(1) == b""
+        except ConnectionResetError:
+            pass
+        # A different immediate peer can still authenticate while the first is full.
+        conn = http.client.HTTPSConnection(
+            "localhost",
+            live["port"],
+            context=client(live, "workload").tls,
+            source_address=("127.0.0.2", 0),
+            timeout=1,
+        )
+        try:
+            conn.request(
+                "POST", "/v1/status", body=b"{}", headers={"Content-Type": "application/json"}
+            )
+            response = conn.getresponse()
+            assert response.status == 200
+            response.read()
+        finally:
+            conn.close()
+        wait_for_connections(server, "127.0.0.1", 0)
+        assert client(live, "workload").call("status")["sealed"] is True
+    finally:
+        for connection in sockets:
+            connection.close()
+
+
+def test_tls_trickle_does_not_extend_total_deadline(live_service):
+    live = live_service
+    server = live["server"]
+    server.handshake_deadline_seconds = 0.4
+    conn = socket.create_connection(("127.0.0.1", live["port"]))
+    try:
+        wait_for_connections(server, "127.0.0.1", 1)
+        started = time.monotonic()
+        # Incomplete TLS record: continuous progress must not reset the deadline.
+        for byte in b"\x16\x03\x03\x40\x00" + b"\x01" * 50:
+            try:
+                conn.sendall(bytes([byte]))
+            except OSError:
+                break
+            time.sleep(0.04)
+            with server.connection_lock:
+                if not server.connections_by_ip.get("127.0.0.1"):
+                    break
+        wait_for_connections(server, "127.0.0.1", 0, timeout=1)
+        assert time.monotonic() - started < 1.2
+        assert client(live, "workload").call("status")["sealed"] is True
+    finally:
+        conn.close()
 
 
 def test_readiness_tracks_live_seal_state(live_service, monkeypatch):
@@ -436,6 +512,17 @@ def test_django_service_integration_and_local_import(live_service, settings, mon
     from backend.apps.core import crypto, keyring
     from backend.apps.core.models import WrappingKeyVersion
 
+    monkeypatch.delenv("KEY_SERVICE_ALLOW_SYNTHETIC_IMPORT", raising=False)
+    with pytest.raises(ServiceUnavailable):
+        client(live_service, "maintenance").call(
+            "import",
+            organization=live_service["org"],
+            key_id=str(uuid.uuid4()),
+            private=p.encode(p.generate()),
+        )
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("SYNTHETIC_MODE", "true")
+    monkeypatch.setenv("KEY_SERVICE_ALLOW_SYNTHETIC_IMPORT", "true")
     live = live_service
     ctx = crypto.context(org.pk, "document", "sara")
     original = crypto.encrypt(b"Retained synthetic document", ctx)
@@ -486,3 +573,121 @@ def test_django_service_integration_and_local_import(live_service, settings, mon
         crypto.rewrap(value, ctx)
     live["store"].unseal(live["secret"], "test-custodian")
     assert crypto.decrypt(value, ctx) == b"New synthetic document"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("preserve_legacy", [False, True])
+def test_custody_cutover_preserves_mfa_and_downloads_fail_closed(
+    live_service, settings, monkeypatch, staff, staff_client, preserve_legacy
+):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from backend.apps.core import crypto, custody_migration, keyring, storage
+    from backend.apps.core.conversations import attachment_context, message_context, subject_context
+    from backend.apps.core.models import Attachment, Conversation, Message, WrappingKeyVersion
+
+    live = live_service
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("SYNTHETIC_MODE", "true")
+    monkeypatch.setenv("KEY_SERVICE_ALLOW_SYNTHETIC_IMPORT", "true")
+    policy = json.loads(live["policy"].read_text())
+    for entry in policy["identities"].values():
+        if entry["role"] != "custodian":
+            entry["organizations"].append(str(staff.organization_id))
+    live["policy"].write_text(json.dumps(policy))
+    live["store"].unseal(live["secret"], "test")
+    conversation = Conversation(
+        organization=staff.organization, owner=staff, expires_at=timezone.now() + timedelta(days=7)
+    )
+    conversation.subject_ciphertext = crypto.encrypt(b"Subject", subject_context(conversation))
+    conversation.save()
+    message = Message(conversation=conversation, staff=staff)
+    message.body_ciphertext = crypto.encrypt(b"Body", message_context(message))
+    message.save()
+    legacy = None
+    if preserve_legacy:
+        legacy = Message(conversation=conversation, staff=staff)
+        old = json.loads(crypto.encrypt(b"Legacy", message_context(legacy)))
+        old.pop("auth")
+        old.pop("auth_v")
+        legacy.body_ciphertext = json.dumps(old)
+        legacy.save()
+    attachment = Attachment(
+        organization=staff.organization,
+        message=message,
+        state="available",
+        object_key="test-object",
+        size=12,
+    )
+    attachment.name_ciphertext = crypto.encrypt(
+        b"test.txt", crypto.context(staff.organization_id, "filename", attachment.pk)
+    )
+    original = crypto.encrypt(b"private file", attachment_context(attachment))
+    storage.put(attachment.object_key, original.encode())
+    attachment.save()
+    mfa_context = crypto.context(staff.organization_id, "mfa", staff.pk)
+    staff.mfa_secret = crypto.encrypt(b"unchanged MFA seed", mfa_context)
+    old_mfa = json.loads(staff.mfa_secret)
+    staff.save(update_fields=["mfa_secret"])
+    report = custody_migration.migrate(
+        staff.organization,
+        client(live, "maintenance"),
+        client(live, "workload"),
+        preserve_legacy=preserve_legacy,
+    )
+    assert report["verified_envelopes"] == 5
+    assert len(report["preserved_unreadable_legacy"]) == int(preserve_legacy)
+    if legacy:
+        legacy.refresh_from_db()
+        assert json.loads(legacy.body_ciphertext) == old
+    assert storage.get(attachment.object_key) == original.encode()
+    staff.refresh_from_db()
+    assert json.loads(staff.mfa_secret)["data"] == old_mfa["data"]
+    assert all(
+        json.loads(row.private_ciphertext)["provider"] == "key-service"
+        for row in WrappingKeyVersion.objects.all()
+    )
+    settings.KEY_PROTECTOR = "key-service"
+    monkeypatch.setattr(keyring, "service", lambda: client(live, "workload"))
+
+    def forbidden(*args):
+        raise AssertionError("No local key fallback")
+
+    monkeypatch.setattr(keyring, "private_keys", forbidden)
+    assert crypto.decrypt(staff.mfa_secret, mfa_context) == b"unchanged MFA seed"
+    url = f"/api/attachments/{attachment.pk}"
+    assert staff_client.get(url).content == b"private file"
+    live["store"].seal("test")
+    assert staff_client.get(url).status_code == 503
+    with pytest.raises(crypto.CryptoUnavailable):
+        crypto.decrypt(original, attachment_context(attachment))
+    with pytest.raises(crypto.CryptoUnavailable):
+        crypto.decrypt_many([(original, attachment_context(attachment))])
+    with pytest.raises(crypto.CryptoUnavailable):
+        crypto.decrypt(staff.mfa_secret, mfa_context)
+    live["store"].unseal(live["secret"], "test")
+    assert staff_client.get(url).content == b"private file"
+
+
+@pytest.mark.django_db
+def test_custody_migration_rejects_corruption_before_remote_mutation(org):
+    from unittest.mock import Mock
+
+    from backend.apps.core import crypto, custody_migration
+    from backend.apps.core.models import StaffUser
+
+    user = StaffUser.objects.create(username="migration-test", organization=org)
+    context = crypto.context(org.pk, "mfa", user.pk)
+    original = json.loads(crypto.encrypt(b"original", context))
+    original["data"] = p.encode(b"corrupted ciphertext")
+    user.mfa_secret = json.dumps(original)
+    user.save(update_fields=["mfa_secret"])
+    maintenance, workload = Mock(), Mock()
+    with pytest.raises(crypto.CryptoUnavailable):
+        custody_migration.migrate(org, maintenance, workload, preserve_legacy=True)
+    maintenance.call.assert_not_called()
+    workload.call.assert_not_called()
+    user.refresh_from_db()
+    assert json.loads(user.mfa_secret) == original

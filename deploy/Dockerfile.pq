@@ -3,6 +3,7 @@ FROM python:3.15-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.lock .
+RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.lock && useradd --create-home app
 COPY --chown=app:app backend ./backend
 COPY --chown=app:app secure_mail ./secure_mail

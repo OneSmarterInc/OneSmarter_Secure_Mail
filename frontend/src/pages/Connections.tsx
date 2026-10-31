@@ -1,3 +1,4 @@
+import { SmtpSettings } from "./SmtpSettings";
 import { useState } from "react";
 import { formatDate, post, useResource } from "../api";
 import {
@@ -65,6 +66,8 @@ export function Connections() {
         title="Connections"
         description="Email delivery, document protection and your approved sender addresses."
       />
+      <SmtpSettings onChanged={() => setRefresh((v) => v + 1)} />
+      <h2 className="section-heading">Service status</h2>
       <div className="connections-toolbar">
         <p className="muted">
           {data
@@ -116,21 +119,28 @@ export function Connections() {
                   mailbox. Confidential messages and documents stay in the
                   portal.
                 </p>
-                <dl className="connection-facts">
-                  <div>
-                    <dt>Delivery method</dt>
-                    <dd>
-                      {data.mail === "smtp" ? "SMTP with TLS" : "Local capture"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Connection verification</dt>
-                    <dd>Configuration only; inbox receipt is not confirmed</dd>
-                  </div>
-                </dl>
+                <details className="connection-details">
+                  <summary>View details</summary>
+                  <dl className="connection-facts">
+                    <div>
+                      <dt>Delivery method</dt>
+                      <dd>
+                        {data.mail === "smtp"
+                          ? "SMTP with TLS"
+                          : "Local capture"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Connection verification</dt>
+                      <dd>
+                        Configuration only; inbox receipt is not confirmed
+                      </dd>
+                    </div>
+                  </dl>
+                </details>
                 <p className="connection-help">
-                  Email credentials are managed on the server, never displayed
-                  or edited here.
+                  Manage your own encrypted credentials in SMTP setup above.
+                  Saved passwords are never displayed.
                 </p>
               </section>
               <section className="card">
@@ -149,24 +159,27 @@ export function Connections() {
                   Accepted documents are encrypted before storage and downloaded
                   through permission-checked endpoints.
                 </p>
-                <dl className="connection-facts">
-                  <div>
-                    <dt>Storage location</dt>
-                    <dd>
-                      {data.storage === "s3"
-                        ? "Private object storage"
-                        : "Application server disk"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Retention</dt>
-                    <dd>No automatic deletion of submitted documents</dd>
-                  </div>
-                  <div>
-                    <dt>Visitor access expiry</dt>
-                    <dd>Ends visitor access; retains the conversation</dd>
-                  </div>
-                </dl>
+                <details className="connection-details">
+                  <summary>View details</summary>
+                  <dl className="connection-facts">
+                    <div>
+                      <dt>Storage location</dt>
+                      <dd>
+                        {data.storage === "s3"
+                          ? "Private object storage"
+                          : "Application server disk"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Retention</dt>
+                      <dd>No automatic deletion of submitted documents</dd>
+                    </div>
+                    <div>
+                      <dt>Visitor access expiry</dt>
+                      <dd>Ends visitor access; retains the conversation</dd>
+                    </div>
+                  </dl>
+                </details>
                 <p className="connection-help">
                   This page does not verify backups or storage durability.
                 </p>
@@ -198,26 +211,29 @@ export function Connections() {
                     ? "Uploads require ClamAV scanning. Files are rejected if the scanner is unavailable or its signatures are stale."
                     : "Antivirus scanning is not enabled. Synthetic validation is not a malware scan."}
                 </p>
-                <dl className="connection-facts">
-                  <div>
-                    <dt>Scanner</dt>
-                    <dd>
-                      {data.scanner === "clamav"
-                        ? "ClamAV"
-                        : "Antivirus not enabled"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Maximum file size</dt>
-                    <dd>
-                      {Math.floor(data.max_upload_bytes / 1024 / 1024)} MiB
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Signature freshness limit</dt>
-                    <dd>{data.signature_max_age_hours} hours</dd>
-                  </div>
-                </dl>
+                <details className="connection-details">
+                  <summary>View details</summary>
+                  <dl className="connection-facts">
+                    <div>
+                      <dt>Scanner</dt>
+                      <dd>
+                        {data.scanner === "clamav"
+                          ? "ClamAV"
+                          : "Antivirus not enabled"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Maximum file size</dt>
+                      <dd>
+                        {Math.floor(data.max_upload_bytes / 1024 / 1024)} MiB
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Signature freshness limit</dt>
+                      <dd>{data.signature_max_age_hours} hours</dd>
+                    </div>
+                  </dl>
+                </details>
                 <button
                   onClick={() => void checkScanner()}
                   disabled={checking || !data.antivirus_enabled}
@@ -250,31 +266,34 @@ export function Connections() {
                   Each document has a separate encryption key. Only authorized
                   workflows can request decryption.
                 </p>
-                <dl className="connection-facts">
-                  <div>
-                    <dt>Document encryption</dt>
-                    <dd>
-                      {data.document_encryption ||
-                        "Unsupported encryption configuration"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Key protection</dt>
-                    <dd>
-                      {data.key_protector === "key-service"
-                        ? "Isolated OneSmarter key service"
-                        : "Local key custody"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Staff authentication</dt>
-                    <dd>Password and multi-factor verification</dd>
-                  </div>
-                  <div>
-                    <dt>Recipient authentication</dt>
-                    <dd>Invitation and email verification code</dd>
-                  </div>
-                </dl>
+                <details className="connection-details">
+                  <summary>View details</summary>
+                  <dl className="connection-facts">
+                    <div>
+                      <dt>Document encryption</dt>
+                      <dd>
+                        {data.document_encryption ||
+                          "Unsupported encryption configuration"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Key protection</dt>
+                      <dd>
+                        {data.key_protector === "key-service"
+                          ? "Isolated OneSmarter key service"
+                          : "Local key custody"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Staff authentication</dt>
+                      <dd>Password and multi-factor verification</dd>
+                    </div>
+                    <div>
+                      <dt>Recipient authentication</dt>
+                      <dd>Invitation and email verification code</dd>
+                    </div>
+                  </dl>
+                </details>
                 <p className="connection-help">
                   Configuration is not an independent security certification.
                 </p>
@@ -316,27 +335,30 @@ export function Connections() {
                   Delivery activity for messages you initiated. Provider
                   acceptance does not guarantee inbox delivery or reading.
                 </p>
-                <dl className="connection-facts">
-                  <div>
-                    <dt>Waiting or sending</dt>
-                    <dd>{pending}</dd>
-                  </div>
-                  <div>
-                    <dt>Accepted by mail provider</dt>
-                    <dd>{data.delivery_counts.provider_accepted || 0}</dd>
-                  </div>
-                  <div>
-                    <dt>Failed or uncertain</dt>
-                    <dd>
-                      {(data.delivery_counts.failed || 0) +
-                        (data.delivery_counts.uncertain || 0)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Captured, not emailed</dt>
-                    <dd>{data.delivery_counts.development_delivered || 0}</dd>
-                  </div>
-                </dl>
+                <details className="connection-details">
+                  <summary>View details</summary>
+                  <dl className="connection-facts">
+                    <div>
+                      <dt>Waiting or sending</dt>
+                      <dd>{pending}</dd>
+                    </div>
+                    <div>
+                      <dt>Accepted by mail provider</dt>
+                      <dd>{data.delivery_counts.provider_accepted || 0}</dd>
+                    </div>
+                    <div>
+                      <dt>Failed or uncertain</dt>
+                      <dd>
+                        {(data.delivery_counts.failed || 0) +
+                          (data.delivery_counts.uncertain || 0)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Captured, not emailed</dt>
+                      <dd>{data.delivery_counts.development_delivered || 0}</dd>
+                    </div>
+                  </dl>
+                </details>
                 <a className="button" href="#/messages">
                   View conversations & delivery details
                 </a>

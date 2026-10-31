@@ -10,6 +10,13 @@ import { post } from "../api";
 
 export function Icon({ name, size = 20 }: { name: string; size?: number }) {
   const paths: Record<string, ReactNode> = {
+    more: (
+      <>
+        <circle cx="5" cy="12" r="1" />
+        <circle cx="12" cy="12" r="1" />
+        <circle cx="19" cy="12" r="1" />
+      </>
+    ),
     mail: (
       <>
         <rect x="3" y="5" width="18" height="14" rx="3" />
@@ -21,6 +28,9 @@ export function Icon({ name, size = 20 }: { name: string; size?: number }) {
         <path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z" />
         <path d="m8 12 3 3 5-6" />
       </>
+    ),
+    paperclip: (
+      <path d="m21 11-8.5 8.5a6 6 0 0 1-8.5-8.5L13 2a4 4 0 0 1 5.7 5.7l-9 9a2 2 0 0 1-2.8-2.8L15 6" />
     ),
     plus: <path d="M12 5v14M5 12h14" />,
     grid: (
@@ -44,6 +54,13 @@ export function Icon({ name, size = 20 }: { name: string; size?: number }) {
         <circle cx="16" cy="17" r="3" />
       </>
     ),
+    reply: <path d="m10 5-7 6 7 6v-4h4c4 0 6 2 7 6v-5c0-5-3-7-7-7h-4z" />,
+    "reply-all": (
+      <>
+        <path d="m7 5-6 6 6 6M14 5l-7 6 7 6v-4h2c3 0 5 2 6 6v-5c0-5-2-7-6-7h-2z" />
+      </>
+    ),
+    back: <path d="M19 12H5m6-6-6 6 6 6" />,
     arrow: <path d="M5 12h14m-5-5 5 5-5 5" />,
     clock: (
       <>
@@ -100,7 +117,7 @@ export function Icon({ name, size = 20 }: { name: string; size?: number }) {
 export function Brand() {
   return (
     <a className="brand" href="#/messages">
-      <span className="brand-mark">1</span>
+      <span className="brand-emblem" aria-hidden="true" />
       <span>
         OneSmarter<small>SECURE MAIL</small>
       </span>
@@ -149,7 +166,6 @@ export function Loading() {
   );
 }
 export function PageHeader({
-  eyebrow,
   title,
   description,
   actions,
@@ -162,7 +178,6 @@ export function PageHeader({
   return (
     <header className="page-header">
       <div>
-        <div className="eyebrow">{eyebrow}</div>
         <h1>{title}</h1>
         {description && <p>{description}</p>}
       </div>

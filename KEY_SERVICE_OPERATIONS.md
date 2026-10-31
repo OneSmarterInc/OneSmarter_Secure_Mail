@@ -17,6 +17,26 @@ The recovery key decrypts a root protection key, which decrypts persistent organ
 
 ## Initialization and credentials
 
+### Connection admission and network boundary
+
+The key service accepts at most 16 concurrent connections and at most four per
+immediate TCP source IP, counting both unauthenticated and authenticated connections.
+IPv4-mapped IPv6 addresses share the IPv4 allowance. Excess connections are closed
+before allocating a worker. TLS negotiation has a two-second total monotonic deadline
+starting at admission, including worker scheduling; partial handshake bytes never
+extend it. Completed TLS requests retain the separate ten-second socket timeout.
+Timeouts, failed TLS and worker-start failures release admission capacity.
+
+Keep port 8443 on loopback for same-host deployments (the CLI default), or bind it
+only to a dedicated private interface for cross-host deployments. Firewall/security
+group ingress must allow only the application workers and maintenance gateway;
+do not publish this port to the Internet or use a public load balancer. Expose the
+maintenance UI only through the controlled gateway. Never trust forwarded HTTP
+headers for pre-TLS source accounting. NAT/proxies share a source allowance, so
+size and test workload concurrency accordingly. Distributed sources can still fill
+the total budget: application limits do not replace private-network isolation.
+Actual production firewall/security-group enforcement requires deployment verification.
+
 Run commands from the repository root using the installed runtime dependencies. Paths below are illustrative Linux deployment paths; provision their ownership and restrictive permissions first. The service is deliberately synthetic-only. Use one service process per SQLite store; multiple processes/replicas and automatic failover are unsupported.
 
 Startup enforces exclusive service ownership using an OS-held `<store>.service.lock` file. Never delete that file to bypass a running owner; stop the owner first. Process termination releases the lock automatically. Use a local filesystem with working OS locks, not a shared network filesystem. A transactional seal epoch additionally invalidates other store objects before their next operation/status check. A failed seal transaction must be treated as an operational failure; already returned DEKs/plaintext cannot be recalled.
@@ -39,9 +59,11 @@ Nonsecret settings: `KEY_PROTECTOR=key-service`, `KEY_SERVICE_URL`, `KEY_SERVICE
 
 For the strict transport profile also set `PQ_TRANSPORT_REQUIRED=true` and use Python 3.15+ with hybrid-capable OpenSSL. The client requires and checks `X25519MLKEM768` before sending key material. The `serve` CLI now defaults to PQ-only transport, including custodian browser connections. Existing classical synthetic previews must explicitly pass `--allow-classical-synthetic`; never use that flag in the strict profile. See [PQ_TRANSPORT.md](PQ_TRANSPORT.md) for runtime, scanner, edge and recovery requirements.
 
-For existing local synthetic versions, first run `python manage.py import_local_keys --organization ORGANIZATION_UUID` for validation, then `python manage.py import_local_keys --organization ORGANIZATION_UUID --apply` with a narrowly scoped maintenance certificate configured. Imports are explicit, idempotent and decrypt-only. Originals are preserved. Use the existing `rotate_wrapping_key` command with maintenance credentials to create an active service version, then configure workload credentials for the running application. Inspect the command's `--help` for organization selection. Verify every old and new document before retiring the local protector; preserve old backups with their matching keys. Never send private import material through the browser.
+Private-key import is disabled by default, even for a maintenance certificate whose existing policy lists `import`. Both dispatch and the store require the key-service process environment to explicitly contain `APP_ENV=development` or `test`, `SYNTHETIC_MODE=true`, and `KEY_SERVICE_ALLOW_SYNTHETIC_IMPORT=true`. These are operator settings, never request parameters. New maintenance identities omit `import` unless registration runs with the same synthetic opt-in; an enabled synthetic service still requires the maintenance role, explicit import permission and matching organization scope. The `--synthetic-only` startup flag alone does not authorize import. Production/staging imports are denied; a reviewed custodian dual-control production import workflow is not implemented.
 
-Before that import, any v1 envelopes must be converted in an isolated offline maintenance run with the application stopped, `KEY_PROTECTOR=local-development` and `ALLOW_LEGACY_SYNTHETIC_READS=true`. Run `python manage.py rewrap_keys --organization ORGANIZATION_UUID` to inspect candidates, then add `--apply` and repeat until no candidates remain. This converts v1 to local v2; import those v2 private versions next using the steps above. Service mode rejects v1 even when the legacy flag is true. Do not temporarily re-enable a local protector in a serving application to bypass a sealed service, and do not delete keys required by old backups.
+Only for isolated synthetic migration, enable those settings and a narrowly scoped maintenance certificate, then run `python manage.py import_local_keys --organization ORGANIZATION_UUID` for validation followed by `--apply`. Imports remain idempotent and decrypt-only; originals are preserved. Remove import permission and disable the opt-in after migration, restart the service and unseal normally. Use `rotate_wrapping_key` with maintenance credentials to create an active service version, then configure workload credentials for the application. Verify retained documents before retiring the local protector and preserve old backups with matching keys. Never send private import material through the browser. This gate does not remove previously imported keys or repair historical exposure; review existing key provenance separately before production use.
+
+Before that import, any v1 envelopes must be converted in an isolated offline maintenance run with the application stopped, `KEY_PROTECTOR=local-development` and `ALLOW_LEGACY_SYNTHETIC_READS=true`. Run `python manage.py rewrap_keys --organization ORGANIZATION_UUID` to inspect candidates, then add `--apply` and repeat until no candidates remain and all skipped counters have been reconciled. Per-record crypto failures are reported and skipped without replacing the original; this does not mean those records migrated successfully. This converts eligible v1 to local v2; import those v2 private versions next using the steps above. Service mode rejects v1 even when the legacy flag is true. Do not temporarily re-enable a local protector in a serving application to bypass a sealed service, and do not delete keys required by old backups.
 
 The Django mirror stores public metadata and service references, not service private keys. Runtime unwrap returns a temporary document DEK to the authorized application, which decrypts the requested content. Compromising that application can misuse its scoped unwrap authority. The service cannot independently establish end-user permission; Django must enforce document ownership/access on every operation. Service-native rewrap keeps the DEK inside the service. The existing application migration path also reads the DEK to authenticate content before replacing its wrapper.
 
@@ -60,7 +82,7 @@ Every request uses mTLS. JSON POST requests have exact fields and a 16 KiB limit
 | `/v1/status` | none | Authorized service identity; safe status/checkpoint |
 | `/v1/versions` | organization; optional active (boolean), after (canonical UUID) | Scoped public metadata, at most 100 entries; returns versions and next_cursor. active=true returns only the active key and cannot be combined with a nonempty cursor |
 | `/v1/rotate` | organization, expected, request_id | Maintenance; active-version compare-and-swap, UUID idempotency key |
-| `/v1/import` | organization, key_id, private | Maintenance; explicit legacy private-material import, never export |
+| `/v1/import` | organization, key_id, private | Disabled by default; explicitly enabled synthetic environment plus scoped maintenance permission only; never export |
 | `/v1/wrap` | organization, context, dek, expected | Workload; exact active version and context-bound wrapper |
 | `/v1/unwrap` | organization, context, wrapper | Workload; temporary Base64 DEK |
 | `/v1/rewrap` | organization, context, wrapper, expected | Workload; new wrapper, same DEK |
@@ -73,11 +95,23 @@ Audit verification detects inconsistent hashes, links and sequence gaps at unsea
 
 ## Rotation and recovery
 
+For non-batch requests, identity allowlisting is checked first, then the per-certificate limit (600 requests per 60-second window), then the shared limit (3000). Requests rejected by the per-certificate limit do not consume the shared budget. Batch unwrap retains its separate per-certificate budget. The shared limit remains a service-wide ceiling: several admitted identities can still exhaust it, so this change does not reserve dedicated custodian capacity. Restart the key service to load admission-policy code changes, then unseal through the normal custody procedure.
+
 Organization-version rotation retains old versions as decrypt-only; old documents remain readable. Rewrapping changes the DEK wrapper and preserves content ciphertext. Root rotation generates a new root, re-protects all private versions and updates the encrypted root header in one transaction, then changes memory state. Interrupted transactions roll back. It serializes operations and requires sizing/latency tests before production. The new recovery input must be generated using a cryptographically secure generator, not a password; length validation cannot establish entropy.
 
 Before root rotation, take a verified encrypted backup with `python -m backend.keyservice backup --store STORE_PATH --destination NEW_BACKUP_PATH`. Keep the matching old recovery material separately. Save the new recovery material separately before submitting the rotation form. An old backup still needs the old secret. If the response is lost, inspect the root identifier and perform an isolated restore/unseal check; do not blindly repeat rotation or destroy either secret.
 
 Restore a copied encrypted backup into an isolated service, use its matching recovery secret, verify key inventory and representative retained documents, and validate application/object metadata consistency before cutover. SQLite backup covers the key store only: object versions, PostgreSQL, policy, certificates, formats/dependencies and custody material need coordinated recovery planning. Losing every usable key/recovery copy makes retained ciphertext unreadable.
+
+After root rotation, `recovery_verification_required` remains true across restarts. Old-root snapshots remain available, ordinary retention pruning pauses, and another root rotation is refused. Merely unsealing does not clear this gate. Stop the key service, retrieve the **new secret from its saved custody location**, and run this offline drill (the secret is prompted securely, never supplied as an argument):
+
+```sh
+python -m backend.keyservice verify-root-recovery --store STORE_PATH --backup-directory BACKUP_DIR --expected-root NEW_ROOT_UUID --destination NEW_ISOLATED_RESTORE_PATH
+```
+
+The command requires exclusive store ownership. It unseals the live store with the new secret, creates an encrypted recovery-proof backup, and restores it to a new destination using the actual restore implementation, checking integrity, audit history and every private key. Only after success does it record verification and retire committed managed snapshots protected by older roots. Wrong secrets, failed restores or interruptions before verification leave old-root backups retained. Unreconciled `.pending` files are never retired by this command. Restart the service and unseal normally afterward.
+
+Protect the recovery-proof backup and isolated restored store as key material. They and external copies need an explicit custody/retention inventory; they are not automatically pruned. Reconcile pending snapshots against committed history before retiring them. Keeping old-root copies until recovery is proven deliberately extends exposure to a compromised old secret; complete the drill promptly. File deletion does not prove physical erasure or removal of off-host/filesystem copies. A key-store drill does not replace a coordinated document/application restore test.
 
 ## Evidence and remaining release gates
 
@@ -103,7 +137,27 @@ Before activating a rotated/imported key or committing root rotation, the store
 creates and fsyncs a complete encrypted-key snapshot from the pending transaction.
 Backup failure aborts activation. A crash after snapshot but before commit can
 leave an extra unused snapshot; reconcile with the protected audit checkpoint,
-not just filename timestamps. No automatic snapshot expiry is introduced.
+not just filename timestamps. Before creating a checkpoint, verify the complete
+source audit chain; verify the copied chain and SQLite integrity before publication.
+A corrupt source seals the store and aborts the pending mutation without replacing
+existing backups. A copied-snapshot verification failure aborts publication.
+
+For committed managed snapshots under the current root, retain every snapshot for
+seven days, then the earliest available snapshot per UTC day through day 30. Always
+retain at least the newest three, even if older than 30 days. Age is calculated from
+the generated nanosecond filename timestamp; future timestamps are preserved after
+clock rollback. This is a candidate operational policy, not an approved production
+retention requirement. Pruning runs only after a new verified snapshot commits.
+It pauses while root recovery verification is pending and never automatically removes
+other-root snapshots, `.pending` files, manual backups or recovery-proof artifacts.
+Old-root retirement remains a separate explicit verified-recovery operation.
+
+Monitor backup capacity: frequent MFA writes produce full snapshots, and seven days
+of complete history can use substantial storage. Disk exhaustion must reject key
+mutations rather than silently shortening retention. Full audit verification and
+snapshot creation hold the store lock; measure latency and disk growth before release.
+Local chain checks cannot detect an attacker coherently rewriting/truncating history;
+independently anchored checkpoints and protected off-host backups remain required.
 
 Restore to a new path only:
 

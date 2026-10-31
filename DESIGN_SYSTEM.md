@@ -176,3 +176,19 @@ Avatar initials use the darker selected-text token for contrast. Native dialogs 
 ## Portal separation and deployment interface - 2026-10-28
 
 Staff and administrators require exact @onesmarter.com accounts. Recipients may use any valid mailbox. Staff enter through /staff/; invitation links enter through /recipient/ and use a separate API namespace and session cookie. Normal user pages no longer display development banners, test-mailbox controls or engineering release requirements. Operator test tools require explicit opt-in. Local captured notifications are explicitly marked not emailed. This supersedes earlier instructions to show development-mode banners on customer pages; deployment status remains documented and enforced on the server. See [DEPLOYMENT.md](DEPLOYMENT.md) for compatibility, configuration and outstanding release blockers.
+
+
+## Compact workspace revision — 31 October 2026
+
+Retain the teal/navy identity, system font stack and white surfaces. Desktop navigation is 232 px wide with a stable, independently scrollable sidebar; the content header is 56 px. Main desktop spacing is 24–28 px, cards 20 px, tables 12 px vertical cell padding. Body stays 14 px and primary controls retain 44 px targets. Mobile navigation wraps, forms stack, and expiry controls get full width at 720 px and below.
+
+Use page-specific breadcrumbs and aria-current for navigation. Filter buttons expose aria-pressed. Empty states distinguish an empty inbox from an empty filter result. Conversation metadata must describe the delivery mode in ordinary language, not internal routing codes. Remove repeated scope slogans inside every statistic card. Keep access limitations and security errors visible.
+
+Connection summaries show status first; optional diagnostic fields live under View details. SMTP credentials remain write-only and the screen explains encrypted passwords versus sealed keys. Document provenance inputs are collapsed until needed, then expand automatically if an upload lacks mandatory provenance; this reduces text-only compose clutter without weakening server validation.
+
+Use desktop and 360 px browser checks for inbox, request, compose, conversation, accounts, audit, settings, evidence, sign-in and recipient entry. Browser review fixtures contain only fictional data.
+
+
+## Unified conversation entry — 31 October 2026
+
+One New conversation action replaces the separate message and information-request actions. The single form accepts optional subject/message for protected invitations, files, To/Cc/Bcc and an access deadline. Default payload uses the existing secure_request contract; authorized Nophi explicitly selects ordinary mode with its required subject/content and acknowledgement. Existing /request links remain a compatible alias to the same composer. Existing protected conversations cannot be downgraded. Page headers omit redundant category labels; conversation headers combine navigation, title/date and delivery status.

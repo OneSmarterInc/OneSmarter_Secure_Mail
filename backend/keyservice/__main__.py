@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.serialization import Encoding
 
 from . import protocol as p
 from .server import Server, Service, tls_context
-from .store import KeyStore
+from .store import KeyStore, synthetic_import_enabled
 
 
 def main():
@@ -31,6 +31,11 @@ def main():
     backup = commands.add_parser("backup")
     backup.add_argument("--store", type=Path, required=True)
     backup.add_argument("--destination", type=Path, required=True)
+    verify = commands.add_parser("verify-root-recovery")
+    verify.add_argument("--store", type=Path, required=True)
+    verify.add_argument("--backup-directory", type=Path, required=True)
+    verify.add_argument("--destination", type=Path, required=True)
+    verify.add_argument("--expected-root", required=True)
     identity = commands.add_parser("identity")
     identity.add_argument("--policy", type=Path, required=True)
     identity.add_argument("--cert", type=Path, required=True)
@@ -97,6 +102,12 @@ def main():
     elif args.command == "backup":
         KeyStore(args.store).backup(args.destination)
         print("Created encrypted SQLite backup. Retain its matching recovery secret separately.")
+    elif args.command == "verify-root-recovery":
+        secret = p.decode(getpass.getpass("New recovery secret retrieved from custody: "), 32)
+        result = KeyStore(args.store, args.backup_directory).verify_root_recovery(
+            secret, args.expected_root, args.destination, "offline-custodian"
+        )
+        print(json.dumps(result))
     elif args.command == "identity":
         if not 1 <= args.days <= 90:
             parser.error("Identity validity must be between 1 and 90 days.")
@@ -108,7 +119,8 @@ def main():
         operations = {
             "custodian": ["custody-status", "unseal", "seal", "rotate-root"],
             "workload": ["status", "versions", "wrap", "unwrap", "rewrap"],
-            "maintenance": ["status", "versions", "rotate", "import"],
+            "maintenance": ["status", "versions", "rotate"]
+            + (["import"] if synthetic_import_enabled() else []),
         }[args.role]
         entry = {
             "name": args.name,

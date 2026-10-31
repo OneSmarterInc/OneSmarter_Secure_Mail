@@ -113,19 +113,19 @@ test("staff request → recipient upload → staff read; accounts and immutable 
     fullPage: true,
   });
   await page
-    .getByRole("link", { name: "Request information", exact: true })
+    .getByRole("link", { name: "New conversation", exact: true })
     .first()
     .click();
   const recipientEmail = `sara.${Date.now()}@example.test`;
   await page.getByLabel("To *", { exact: true }).fill(recipientEmail);
   await page.getByLabel("To *", { exact: true }).press("Enter");
   await page
-    .getByLabel("Request title (optional)")
+    .getByLabel("Subject (optional)")
     .fill("Sara’s confidential application");
   await page
-    .getByLabel("Instructions (optional)")
+    .getByLabel("Message or document request (optional)")
     .fill("Please upload your fictional application document.");
-  await page.getByRole("button", { name: "Send secure request" }).click();
+  await page.getByRole("button", { name: "Start secure conversation" }).click();
   await expect(
     page.getByRole("heading", { name: "Sara’s confidential application" }),
   ).toBeVisible();
@@ -189,6 +189,17 @@ test("staff request → recipient upload → staff read; accounts and immutable 
   ).toBeVisible();
   const fileText =
     "Fictional application for Sara. This document contains no real confidential data.";
+  await sara
+    .getByText("Document source details (required for attachments)", {
+      exact: true,
+    })
+    .click();
+  await sara
+    .getByLabel("Source document URL")
+    .fill("https://example.com/test.txt");
+  await sara
+    .getByLabel("Original download time (your local time)")
+    .fill("2026-01-01T12:00");
   await sara.getByLabel("Upload attachments").setInputFiles({
     name: "sara-application.txt",
     mimeType: "text/plain",

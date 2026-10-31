@@ -25,5 +25,22 @@ class Command(BaseCommand):
                 "Rewrap stopped. Completed records remain valid; the failed record was not replaced. Check keys/storage and rerun."
             ) from exc
         self.stdout.write(
-            f"Candidates: {result['candidates']}; updated: {result['updated']}. Repeat until candidates is zero. Old key versions are retained."
+            f"Candidates: {result['candidates']}; updated: {result['updated']}; "
+            f"skipped legacy: {result['skipped_legacy']}; "
+            f"skipped invalid: {result['skipped_invalid']}; "
+            f"skipped crypto unavailable: {result['skipped_crypto_unavailable']}. "
+            "Old key versions are retained."
         )
+        if any(
+            result[name]
+            for name in ("skipped_legacy", "skipped_invalid", "skipped_crypto_unavailable")
+        ):
+            self.stdout.write(
+                self.style.WARNING(
+                    "Migration incomplete: skipped records remain unchanged. Resolve their recovery/key-service issues and rerun; zero candidates alone does not mean completion."
+                )
+            )
+        else:
+            self.stdout.write(
+                "Repeat until candidates is zero. Dry runs do not verify service unwrap eligibility."
+            )

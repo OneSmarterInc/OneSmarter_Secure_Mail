@@ -24,7 +24,7 @@ The clean interface is not production certification. `deploy/production.env.exam
 
 Outstanding work includes independent hybrid-crypto review; approved PQ ingress/key/scanner/recovery coverage; custody and coordinated restore evidence; actual SMTP/delivery tests; immutable audit storage; region and backup/disposal policies; container resource/load verification. The selected instance-mounted persistent document storage also needs its production adapter/mount checks: the current local storage adapter is restricted to synthetic mode and the optional S3 adapter is not the selected document-storage target. See RELEASE_GATES.md and OPERATIONS_RUNBOOK.md.
 
-The existing PQ ingress candidate now proxies both API namespaces and denies development endpoints. It still requires a compatible reviewed nginx/OpenSSL build, certificates, private socket permissions and deployment validation. No DNS, AWS resources, real email or public deployment was changed by this work.
+The PQ ingress candidate uses separate virtual hosts: `staff.example.test` proxies only `/api/`, while `secure.example.test` proxies only `/recipient-api/`. Each rejects the other portal's API and UI entry paths; the staff host also rejects legacy `/api/recipient/` routes. The recipient root redirects to `/recipient/`. Unknown TLS names are rejected by the default server, and mismatched TLS SNI/HTTP host requests are rejected. Replace both example hostnames, including their SNI guards, and configure matching certificates and the origins in `deploy/pq.env.example`. The template still requires a compatible reviewed nginx/OpenSSL build, private socket permissions and deployment validation. No DNS, AWS resources, real email or public deployment was changed by this work.
 
 ## Trusted proxy and token buckets (29 October 2026)
 
@@ -56,7 +56,7 @@ edge capacity controls. An attacker can exhaust a targeted identity allowance;
 this is the intentional account brute-force limit, not an organization-wide lock.
 
 Existing `maximum` is bucket capacity; `seconds` is time to refill a completely
-empty bucket. Login holds 10 tokens and refills one per 30 seconds; MFA holds 5
+empty bucket. Login holds 10 tokens and refills one per 6 seconds; MFA holds 5
 and refills one per 60 seconds. Integer credits preserve fractional refill,
 cap at capacity, and are updated under database row locks. Exhaustion returns
 429 without restarting a fixed window. A request denied by one applicable bucket
@@ -68,3 +68,38 @@ Stop old application/worker processes, apply `python manage.py migrate`, and
 restart with matching code/configuration. This rollout resets rate allowances;
 no accounts, conversations or documents are removed. Do not run mixed old/new
 application versions against the changed rate-bucket schema.
+
+### CI image and ingress gates
+
+The browser job now runs `python scripts/check_compose_browser.py`. It builds the
+root backend, PQ backend candidate and frontend images, runs `nginx -t` on both
+the built default configuration and the **unchanged** `deploy/pq-nginx.conf` with
+an ephemeral certificate, and runs Playwright through built nginx on port 8080.
+`deploy/compose.ci.yaml` supplies disposable PostgreSQL, Redis, Celery worker/beat
+and a real mTLS status fixture. Browser crypto/scanning remain explicitly synthetic;
+the separate PQ key-service and real ClamAV jobs cover those boundaries. No SMTP
+credentials are supplied, and all mail is captured inside the disposable stack.
+The runner removes its Compose project and volumes on exit. Its ignored local
+logs/session artifacts are not uploaded as public CI artifacts.
+
+Actions are pinned to resolved upstream commit SHAs. Python audits cover both
+lock files with pinned `pip-audit --strict`; npm audits include development tools.
+The nginx base is digest-pinned to a current stable Alpine build for PQ config
+support. Python 3.12 remains the ordinary backend target and 3.15 the PQ candidate;
+both builds are required. The new container gates still need execution on a
+Docker-capable runner; Docker is unavailable on the current Windows host.
+
+Run locally on a Docker-capable machine after installing the locked Python and
+frontend dependencies and Playwright Chromium:
+
+```sh
+python scripts/check_compose_browser.py
+```
+
+## Local evidence preservation and OTP sender update — 31 October 2026
+
+See [EVIDENCE_ARCHIVE.md](EVIDENCE_ARCHIVE.md) for the implemented capture catalog, original-file hashes, server-download provenance, encrypted create-only local bundles, verified exports, legacy backfill and optional RFC 3161 verification. The user selected local preservation for now and an unset TSA. Deployment must not silently switch to AWS. Local preservation is not administrator-proof cloud WORM; pending timestamps are not trusted timestamps. Hospital-list reconciliation is excluded.
+
+Emailed recipient OTP challenges authenticate through the organisation SMTP transport using the conversation owner's encrypted staff SMTP username and password. Only the From/envelope sender is support@onesmarter.com; Reply-To remains the staff address. No separate support password is required. The provider must authorize each staff account to send as support@onesmarter.com; rejected delivery fails closed without a sender fallback. Missing staff credentials block OTP delivery. Staff authenticator TOTP is unchanged. Ordinary conversation notifications retain each owning staff member's SMTP sender.
+
+Local key-service calls now prefer the IPv4 loopback listener while retaining localhost certificate verification and PQ requirements. Every wrap/unwrap still contacts the service; no plaintext, data keys or readiness result is cached to achieve the speedup. Initial workspace session checks time out after eight seconds with retry; authenticated drafts survive transient polling failures.
