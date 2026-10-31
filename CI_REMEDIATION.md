@@ -13,3 +13,5 @@ Local checks: 38 mocked-API browser tests passed, frontend build and formatting 
 
 ClamAV's default TCP health check is documented at https://docs.clamav.net/manual/Installing/Docker.html .
 
+
+Container verification found high-severity Debian base-package advisories without fixes listed. Candidate Python runtimes now use pinned Alpine images and are revalidated through the same Compose and real PQ tests. The Trivy gate scans all three built images before reporting failure; no vulnerability ignores or severity downgrades are used.
