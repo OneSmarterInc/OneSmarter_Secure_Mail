@@ -57,16 +57,8 @@ for (const failure of ["network", "503", "401", "signed-out"]) {
       .fill("Keep my unsent draft");
     if (failure === "network" || failure === "503") {
       await page
-        .getByText("Document source details (required for attachments)", {
-          exact: true,
-        })
+        .getByRole("button", { name: "Attach files", exact: true })
         .click();
-      await page
-        .getByLabel("Source document URL")
-        .fill("https://example.com/draft.txt");
-      await page
-        .getByLabel("Original download time (your local time)")
-        .fill("2026-01-01T12:00");
       await page.locator('input[type="file"]').setInputFiles({
         name: "draft.txt",
         mimeType: "text/plain",

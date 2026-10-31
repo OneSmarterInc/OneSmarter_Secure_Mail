@@ -29,6 +29,12 @@ x-app: &app
 services:
   clamav:
     image: clamav/clamav:1.4@sha256:982e28f90061d0e66eb03276419f589a47c9fa601e985e472fc2f6c64b497ca0
+    healthcheck:
+      test: [CMD, clamdscan, --config-file=/etc/clamav/clamd.conf, --ping=1:1]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 30
     environment:
       TZ: UTC
       FRESHCLAM_CHECKS: "12"

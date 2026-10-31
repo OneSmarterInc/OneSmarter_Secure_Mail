@@ -116,12 +116,15 @@ def test_deactivation_preserves_owner_and_blocks_recipient(staff_client, staff, 
     assert staff_client.get(f"/api/conversations/{conversation.pk}").status_code in [401, 403]
     from backend.tests.conftest import authenticated
 
-    assert (
-        authenticated(staff.__class__.objects.get(pk=staff.pk))
-        .get(f"/api/conversations/{conversation.pk}")
-        .status_code
-        == 200
-    )
+    staff.refresh_from_db()
+    assert not staff.has_usable_password()
+    assert not staff.mfa_confirmed and not staff.mfa_secret and not staff.recovery_hashes
+    assert authenticated(staff).get(f"/api/conversations/{conversation.pk}").status_code == 401
+    # Model completion of fresh recovery/enrolment; retained ownership is unchanged.
+    staff.set_password("Fresh-test-only-password!")
+    staff.mfa_confirmed = True
+    staff.save()
+    assert authenticated(staff).get(f"/api/conversations/{conversation.pk}").status_code == 200
 
 
 @pytest.mark.django_db

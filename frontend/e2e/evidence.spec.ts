@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-test("capture catalog distinguishes declared provenance, local storage and pending timestamps", async ({
+test("archive lists scoped documents and keeps failed downloads inside the portal", async ({
   page,
 }) => {
   await page.route("**/api/**", async (route) => {
@@ -18,7 +18,7 @@ test("capture catalog distinguishes declared provenance, local storage and pendi
           csrf: "test",
         },
       });
-    if (path.endsWith("/export"))
+    if (path.endsWith("/attachments/file-1"))
       return route.fulfill({
         status: 503,
         json: {
@@ -36,7 +36,12 @@ test("capture catalog distinguishes declared provenance, local storage and pendi
           tsa_configured: false,
           results: [
             {
-              capture_id: "capture-1",
+              id: "file-1",
+              conversation_id: "thread-1",
+              conversation: "Test conversation",
+              sender: "Test staff",
+              sender_email: "staff@example.com",
+              uploaded_at: "2026-01-01T10:00:00Z",
               filename: "example.txt",
               sha256: "a".repeat(64),
               source_url: "https://example.com/example.txt",
@@ -52,17 +57,12 @@ test("capture catalog distinguishes declared provenance, local storage and pendi
     return route.fulfill({ json: { ready: true } });
   });
   await page.goto("/staff/#/evidence");
+
   await expect(
-    page.getByRole("heading", { name: "Archive" }),
-  ).toBeVisible();
-  await expect(
-    page.getByText("Uploader-declared; not independently verified"),
-  ).toBeVisible();
-  await expect(
-    page.getByText("Pending — no trusted timestamp claimed"),
-  ).toBeVisible();
+    page.getByRole("table", { name: "Conversation documents" }),
+  ).toContainText("example.txt");
   await page
-    .getByRole("button", { name: "Download verified evidence package" })
+    .getByRole("button", { name: "Download example.txt", exact: true })
     .click();
   await expect(page.getByText("Evidence verification failed.")).toBeVisible();
   await expect(page).toHaveURL(/#\/evidence$/);
@@ -83,7 +83,7 @@ test("initial session timeout offers retry instead of an endless workspace spinn
 }) => {
   await page.route("**/api/auth/session", () => new Promise<void>(() => {}));
   await page.goto("/staff/");
-  await expect(
-    page.getByRole("button", { name: "Try again" }),
-  ).toBeVisible({ timeout: 12000 });
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible({
+    timeout: 12000,
+  });
 });

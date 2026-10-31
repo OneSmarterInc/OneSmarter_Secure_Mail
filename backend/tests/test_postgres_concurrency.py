@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from django.db import OperationalError, close_old_connections, connection, connections, transaction
 from django.db.models import F
-from django.test import Client, TransactionTestCase
+from django.test import Client
 from django.utils import timezone
 from psycopg import sql
 
@@ -36,33 +36,6 @@ pytestmark = [
         connection.vendor != "postgresql", reason="Requires real PostgreSQL row locks"
     ),
 ]
-
-
-@pytest.fixture(scope="module", autouse=True)
-def allow_test_database_teardown():
-    """Only the test runner may truncate its disposable database after each test.
-
-    Keep all audit triggers enabled while application operations run. Django's
-    transaction tests flush with TRUNCATE, which our production trigger denies.
-    """
-    original = TransactionTestCase._fixture_teardown
-
-    def teardown(case):
-        if connection.vendor != "postgresql":
-            return original(case)
-        if not connection.settings_dict["NAME"].startswith("test_"):
-            raise RuntimeError("Refusing teardown override outside a test database")
-        with connection.cursor() as cursor:
-            cursor.execute("ALTER TABLE core_auditevent DISABLE TRIGGER audit_no_truncate")
-        try:
-            return original(case)
-        finally:
-            with connection.cursor() as cursor:
-                cursor.execute("ALTER TABLE core_auditevent ENABLE TRIGGER audit_no_truncate")
-
-    TransactionTestCase._fixture_teardown = teardown
-    yield
-    TransactionTestCase._fixture_teardown = original
 
 
 def race(*operations):

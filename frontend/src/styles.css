@@ -3714,3 +3714,8 @@ dialog:has(.conversation-actions-grid) .modal-heading {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Accessible disclosure links on tinted message surfaces. */
+.mail-details summary {
+  color: #075f5d;
+}

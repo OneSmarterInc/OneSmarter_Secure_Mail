@@ -22,7 +22,17 @@ test("recipient chat matches staff layout and preserves collapsed drafts", async
             author_type: i % 2 ? "recipient" : "staff",
             body: `Message ${i}`,
             created_at: `2026-01-01T12:${String(i).padStart(2, "0")}:00Z`,
-            attachments: i === 11 ? [{ id: "visible-file", name: "Shared.pdf", state: "available", size: 100 }] : [],
+            attachments:
+              i === 11
+                ? [
+                    {
+                      id: "visible-file",
+                      name: "Shared.pdf",
+                      state: "available",
+                      size: 100,
+                    },
+                  ]
+                : [],
             headers: {
               from_name: i % 2 ? "Sara" : "Staff",
               from_email: i % 2 ? "sara@example.com" : "staff@example.com",
@@ -79,13 +89,17 @@ test("recipient chat matches staff layout and preserves collapsed drafts", async
   const nav = page.getByRole("navigation", { name: "Recipient navigation" });
   await expect(nav.getByRole("button")).toHaveCount(2);
   await nav.getByRole("button", { name: "Archive" }).click();
-  await expect(page.getByRole("table", { name: "Conversation documents" })).toContainText("Shared.pdf");
+  await expect(
+    page.getByRole("table", { name: "Conversation documents" }),
+  ).toContainText("Shared.pdf");
   await expect(header).not.toBeVisible();
   await page.getByRole("textbox", { name: "Search documents" }).fill("missing");
   await expect(page.getByText("No documents match your search.")).toBeVisible();
   await nav.getByRole("button", { name: "Conversations", exact: true }).click();
   await header.getByRole("button", { name: "New message" }).click();
-  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Keep my recipient draft");
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue(
+    "Keep my recipient draft",
+  );
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.screenshot({ path: "test-results/recipient-chat-desktop.png" });
   await page.setViewportSize({ width: 360, height: 800 });

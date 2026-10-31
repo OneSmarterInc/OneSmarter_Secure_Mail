@@ -98,4 +98,3 @@ for (const role of ["admin", "staff"]) {
     ).toBe(true);
   });
 }
-

@@ -52,7 +52,9 @@ for (const normal of [false, true]) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/staff/#/compose");
     await expect(page.locator(".compose-address-row select")).toBeVisible();
-    const from = await page.locator(".compose-address-row select").boundingBox();
+    const from = await page
+      .locator(".compose-address-row select")
+      .boundingBox();
     const to = await page
       .locator(".compose-address-row .recipient-input")
       .boundingBox();
@@ -108,4 +110,3 @@ for (const normal of [false, true]) {
     );
   });
 }
-

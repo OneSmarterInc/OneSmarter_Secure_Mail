@@ -46,10 +46,12 @@ def test_real_nginx_pq_host_routing(tmp_path):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     source = SOURCE.read_text()
+    # Stock nginx lacks ssl_curve: stub telemetry only in this HTTP routing test.
     # Exercise the shipped routing on stock nginx over loopback HTTP. Only TLS
     # directives and the upstream are replaced; this is not a PQ/TLS test.
     source = re.sub(r"^    ssl_.*\n", "", source, flags=re.M)
     source = re.sub(r"^    if \(\$ssl_.*\n", "", source, flags=re.M)
+    source = source.replace("$ssl_curve", "not-tested")
     source = source.replace("listen 443 ssl", f"listen 127.0.0.1:{port}")
     source = source.replace("proxy_pass http://unix:/run/onesmarter/app.sock:;", "return 204;")
     config = tmp_path / "nginx.conf"
@@ -62,12 +64,16 @@ def test_real_nginx_pq_host_routing(tmp_path):
     process = subprocess.Popen(
         [nginx, "-p", str(tmp_path), "-c", str(config)],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
     try:
         for _ in range(100):
             if process.poll() is not None:
-                pytest.fail("nginx failed: " + (tmp_path / "error.log").read_text())
+                pytest.fail(
+                    "nginx failed: "
+                    + process.communicate()[1].decode()
+                    + (tmp_path / "error.log").read_text()
+                )
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=0.1):
                     break

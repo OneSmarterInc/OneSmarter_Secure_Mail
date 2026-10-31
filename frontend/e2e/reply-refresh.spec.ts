@@ -70,17 +70,6 @@ for (const status of [200, 503, 403, 404]) {
     await page
       .getByRole("button", { name: "Attach files", exact: true })
       .click();
-    await page
-      .getByText("Document source details (required for attachments)", {
-        exact: true,
-      })
-      .click();
-    await page
-      .getByLabel("Source document URL")
-      .fill("https://example.com/draft.txt");
-    await page
-      .getByLabel("Original download time (your local time)")
-      .fill("2026-01-01T12:00");
     await page.locator('input[type="file"]').setInputFiles({
       name: "draft.txt",
       mimeType: "text/plain",
@@ -89,6 +78,9 @@ for (const status of [200, 503, 403, 404]) {
     await expect(
       page.getByRole("button", { name: "Remove draft.txt" }),
     ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Conversation actions", exact: true })
+      .click();
     holdRefresh = true;
     await page
       .getByRole("button", { name: "Refresh status", exact: true })
@@ -123,14 +115,23 @@ for (const status of [200, 503, 403, 404]) {
       await expect(
         page.getByText("Refresh failed", { exact: true }),
       ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Close dialog", exact: true })
+      .click();
     await page.getByRole("button", { name: "Submit reply" }).click();
     await expect(
       page.getByText("Reply saved. Notification queued.", { exact: true }),
     ).toBeVisible();
+    await expect(page.getByLabel("Message", { exact: true })).toHaveValue("");
+    await page
+      .getByRole("button", { name: "Conversation actions", exact: true })
+      .click();
     await expect(
       page.getByRole("button", { name: "Refresh status", exact: true }),
     ).toBeEnabled();
-    await expect(page.getByLabel("Message", { exact: true })).toHaveValue("");
+    await page
+      .getByRole("button", { name: "Close dialog", exact: true })
+      .click();
     await expect(
       page.getByText("Reply saved. Notification queued.", { exact: true }),
     ).toBeVisible();

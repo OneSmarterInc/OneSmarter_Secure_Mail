@@ -123,7 +123,12 @@ test("workspace screens remain usable on desktop and mobile", async ({
       data = {
         results: [
           {
-            capture_id: "sample-capture",
+            id: "sample-file",
+            conversation_id: "review",
+            conversation: conversation.subject,
+            sender: user.name,
+            sender_email: user.email,
+            uploaded_at: now,
             filename: "application-documents.pdf",
             sha256: "a".repeat(64),
             source_url: "https://example.com/document.pdf",
@@ -164,12 +169,19 @@ test("workspace screens remain usable on desktop and mobile", async ({
       "evidence",
     ]) {
       await page.goto(`/staff/#/${path}`);
-      await expect(page.locator("main h1")).toBeVisible();
+      await expect(
+        path === "evidence"
+          ? page.getByRole("table", { name: "Conversation documents" })
+          : page.locator("main h1"),
+      ).toBeVisible();
       if (path === "messages/review") {
         if (width === 1440)
           expect(
             (await page.locator(".conversation-header").boundingBox())!.height,
           ).toBeLessThanOrEqual(64);
+        await page
+          .getByRole("button", { name: "Conversation actions", exact: true })
+          .click();
         await expect(page.getByLabel("Notification summary")).toContainText(
           "6",
         );
@@ -188,6 +200,10 @@ test("workspace screens remain usable on desktop and mobile", async ({
           .getByText("Notification history (6)", { exact: true })
           .click();
       }
+      if (path === "messages/review")
+        await page
+          .getByRole("button", { name: "Close dialog", exact: true })
+          .click();
       if (width === 1440) {
         const header = page.locator(".page-header, .conversation-header");
         if (await header.count())

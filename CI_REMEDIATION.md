@@ -1,0 +1,14 @@
+# CI remediation — 31 October 2026
+
+- DeliveryJob.state now allows 32 characters, including the 21-character development_delivered state. Migration 0022 fixes PostgreSQL rejection; SQLite did not enforce this length.
+- Disposable PostgreSQL transaction-test teardown temporarily disables only the no-TRUNCATE audit trigger. Mutation protection remains enabled during application tests; the override refuses non-test database names. The fixture now covers all transaction tests, including nginx integration.
+- The HTTP host-routing regression replaces unsupported ssl_curve telemetry on stock nginx and captures startup stderr. The unmodified production TLS configuration remains checked separately in the built nginx image.
+- PQ integration runs inside the same pinned Python/OpenSSL image as the candidate key service. Image build verifies support for X25519MLKEM768 before any test. No classical fallback is introduced on controlled internal hops.
+- ClamAV readiness probes its configured Unix socket with clamdscan instead of the image's TCP-only health check. Failure diagnostics include daemon and health-check logs. The same socket health check is used in Compose.
+- Browser tests follow current modal actions, optional attachment controls and document-table response schema. Disclosure text contrast is strengthened. React formatting is normalized without changing component behavior.
+- The secret scanner's two historical findings are confirmed false positives on a Django query containing purpose="password_recovery", consumed_at=None. Only their exact fingerprints are ignored; credential detection remains active everywhere else.
+- Reactivation regression requires fresh password/MFA enrolment before restored access while preserving ownership.
+
+Local checks: 38 mocked-API browser tests passed, frontend build and formatting passed, Ruff and migration drift checks passed, secret history scan clean with reviewed exact exceptions. GitHub CI is required for PostgreSQL, built-stack browser, nginx, ClamAV and PQ transport results. None of these changes closes the independent cryptographic review or other production release gates.
+
+ClamAV's default TCP health check is documented at https://docs.clamav.net/manual/Installing/Docker.html .

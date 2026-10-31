@@ -203,7 +203,7 @@ class DeliveryJob(models.Model):
     )
     grant = models.ForeignKey(RecipientGrant, null=True, on_delete=models.PROTECT)
     payload_ciphertext = models.TextField()
-    state = models.CharField(max_length=20, default="queued")
+    state = models.CharField(max_length=32, default="queued")
     attempts = models.PositiveIntegerField(default=0)
     error_code = models.CharField(max_length=50, blank=True)
     next_attempt = models.DateTimeField(default=timezone.now)
