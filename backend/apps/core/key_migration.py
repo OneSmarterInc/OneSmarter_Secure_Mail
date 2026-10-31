@@ -13,7 +13,6 @@ from .models import (
     DeliveryJob,
     EvidenceCapture,
     Message,
-    OrganizationSMTP,
     StaffSMTP,
     StaffUser,
 )
@@ -42,11 +41,6 @@ def migrate(org, *, apply=False, limit=100):
         "skipped_crypto_unavailable": 0,
     }
     specs = [
-        (
-            OrganizationSMTP,
-            "organization",
-            [("otp_password_ciphertext", lambda x: crypto.context(org.pk, "otp-smtp", org.pk))],
-        ),
         (
             EvidenceCapture,
             "organization",

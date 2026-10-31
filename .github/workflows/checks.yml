@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
         env:
           POSTGRES_DB: secure_mail
           POSTGRES_USER: secure_mail
@@ -117,7 +117,7 @@ jobs:
       - name: Start isolated scanner with configured limits
         run: |
           mkdir -p /tmp/onesmarter-scanner
-          docker run --detach --name readiness-clamav --volume /tmp/onesmarter-scanner:/tmp --env TZ=UTC --volume "$PWD/deploy/clamd.conf:/etc/clamav/clamd.conf:ro" clamav/clamav:1.4
+          docker run --detach --name readiness-clamav --volume /tmp/onesmarter-scanner:/tmp --env TZ=UTC --volume "$PWD/deploy/clamd.conf:/etc/clamav/clamd.conf:ro" clamav/clamav:1.4@sha256:982e28f90061d0e66eb03276419f589a47c9fa601e985e472fc2f6c64b497ca0
       - name: Wait for signatures and daemon
         shell: bash
         run: |
@@ -128,6 +128,7 @@ jobs:
             sleep 5
           done
           exit 1
+      - run: sudo chgrp "$(id -g)" "$CLAMAV_SOCKET"
       - run: python manage.py check_scanner
       - run: pytest backend/tests/test_readiness.py::test_real_clamav_clean_and_eicar backend/tests/test_scanner.py -q
       - name: Stop disposable scanner
@@ -142,3 +143,26 @@ jobs:
         with: { python-version: "3.12" }
       - run: python -m pip install pip-audit==2.10.1
       - run: pip-audit --strict -r requirements.lock -r requirements-test.lock
+
+  security-scanners:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with: { python-version: "3.12" }
+      - run: pip install bandit==1.9.4
+      - run: bandit -r backend/apps backend/keyservice backend/transport -lll -f json -o bandit.json
+      - name: Reject incomplete static analysis
+        run: python -c "import json; report=json.load(open('bandit.json')); assert not report['errors'], 'Bandit did not scan all files'"
+      - name: Scan repository history for secrets
+        run: docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.24.3@sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055 git /repo --redact --exit-code 1
+      - run: docker build -t securemail-backend:scan .
+      - run: docker build -t securemail-frontend:scan frontend
+      - run: docker build -f deploy/Dockerfile.pq -t securemail-pq:scan .
+      - name: Reject high and critical container vulnerabilities
+        run: |
+          for image in securemail-backend:scan securemail-frontend:scan securemail-pq:scan; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c image --exit-code 1 --severity HIGH,CRITICAL "$image"
+          done

@@ -16,7 +16,6 @@ from .models import (
     DeliveryJob,
     EvidenceCapture,
     Message,
-    OrganizationSMTP,
     StaffSMTP,
     StaffUser,
     WrappingKeyVersion,
@@ -25,11 +24,6 @@ from .models import (
 
 def envelopes(org):
     specs = [
-        (
-            OrganizationSMTP.objects.filter(organization=org),
-            "otp_password_ciphertext",
-            lambda x: crypto.context(org.pk, "otp-smtp", org.pk),
-        ),
         (
             EvidenceCapture.objects.filter(organization=org),
             "metadata_ciphertext",

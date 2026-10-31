@@ -19,7 +19,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework.response import Response
 
-from . import crypto, document_service
+from . import crypto, document_service, integrity
 from .evidence_transport import checked_url, retrieve
 from .http import Problem, endpoint, unavailable
 from .models import Attachment, EvidenceCapture, Message
@@ -89,11 +89,13 @@ def source_metadata(request) -> dict:
 def capture_attachment(attachment, plaintext: bytes, *, legacy=False):
     """Called within the attachment finalization transaction, after authorization/scanning."""
     if attachment.evidence_capture_id:
-        if attachment.sha256 != digest(plaintext):
+        if not integrity.matches(attachment.organization_id, plaintext, attachment.sha256):
             raise Problem("File integrity verification failed.", "integrity_failed", 503)
         return attachment.evidence_capture
     file_digest = digest(plaintext)
-    if attachment.sha256 and attachment.sha256 != file_digest:
+    if attachment.sha256 and not integrity.matches(
+        attachment.organization_id, plaintext, attachment.sha256
+    ):
         raise Problem("File integrity verification failed.", "integrity_failed", 503)
     metadata = (
         json.loads(
@@ -111,7 +113,7 @@ def capture_attachment(attachment, plaintext: bytes, *, legacy=False):
     )
     capture = EvidenceCapture(
         organization_id=attachment.organization_id,
-        sha256=file_digest,
+        sha256=integrity.tag(attachment.organization_id, plaintext),
         provenance=metadata["provenance"],
     )
     ordinary_upload = (
@@ -153,7 +155,7 @@ def capture_attachment(attachment, plaintext: bytes, *, legacy=False):
     preserve(path_for(capture), encrypted)
     capture.save()
     attachment.evidence_capture = capture
-    attachment.sha256 = file_digest
+    attachment.sha256 = capture.sha256
     attachment.save(update_fields=["evidence_capture", "sha256"])
     audit(
         attachment.organization_id,
@@ -177,8 +179,8 @@ def read_bundle(capture) -> tuple[dict, bytes]:
     if (
         manifest["capture_id"] != str(capture.pk)
         or manifest["organization_id"] != str(capture.organization_id)
-        or manifest["sha256"] != capture.sha256
-        or digest(content) != capture.sha256
+        or digest(content) != manifest["sha256"]
+        or not integrity.matches(capture.organization_id, content, capture.sha256)
         or len(content) != manifest["size"]
     ):
         raise ValueError("Evidence manifest or original-file digest mismatch.")
@@ -405,7 +407,14 @@ def catalog(request):
         return document_table(request, page)
     query = authorized_captures(request.user)
     if request.query_params.get("sha256"):
-        query = query.filter(sha256=request.query_params["sha256"])
+        try:
+            query = query.filter(
+                sha256=integrity.tag_digest(
+                    request.user.organization_id, request.query_params["sha256"].lower()
+                )
+            )
+        except ValueError:
+            raise Problem("Enter a valid SHA-256 digest.") from None
     rows = []
     for capture in query.order_by("-created_at", "pk")[(page - 1) * 25 : page * 25]:
         manifest = json.loads(

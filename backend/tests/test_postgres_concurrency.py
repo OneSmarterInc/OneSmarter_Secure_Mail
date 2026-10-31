@@ -131,7 +131,7 @@ def test_same_otp_is_consumed_once(staff_client):
     challenge = OTPChallenge(
         grant=conversation.grants.get(), expires_at=timezone.now() + timedelta(minutes=5)
     )
-    challenge.verifier = keyed(f"otp:{challenge.pk}:123456")
+    challenge.verifier = keyed(f"otp:{challenge.pk}:123456", purpose="otp")
     challenge.save()
     clients = [Client(), Client()]
     result = race(

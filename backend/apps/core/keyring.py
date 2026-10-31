@@ -102,7 +102,7 @@ def rotate(
     request_id: str | None = None,
     expected_active: str | None = "",
 ) -> WrappingKeyVersion:
-    from .services import audit, keyed, lock_organization
+    from .services import audit, keyed, lock_organization, verifier_matches
 
     organization = lock_organization(org)
     if settings.KEY_PROTECTOR == "key-service" and (not request_id or expected_active == ""):
@@ -130,7 +130,18 @@ def rotate(
         }
         previous = IdempotencyRecord.objects.filter(**record).first()
         if previous:
-            if not secrets.compare_digest(previous.fingerprint, fingerprint):
+            if not verifier_matches(
+                json.dumps(
+                    {
+                        "expected": expected_active,
+                        "reason": reason,
+                        "actor": str(getattr(actor, "pk", actor)),
+                    },
+                    sort_keys=True,
+                ),
+                previous.fingerprint,
+                purpose="idempotency",
+            ):
                 raise ValueError("Rotation operation ID was reused with different parameters.")
             return WrappingKeyVersion.objects.get(
                 pk=previous.resource_id, organization=organization

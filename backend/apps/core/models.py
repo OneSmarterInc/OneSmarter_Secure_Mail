@@ -135,7 +135,7 @@ class Attachment(models.Model):
     media_type = models.CharField(max_length=100)
     state = models.CharField(max_length=16, default="pending")
     scan_method = models.CharField(max_length=32, blank=True)
-    sha256 = models.CharField(max_length=64, blank=True)
+    sha256 = models.CharField(max_length=80, blank=True)
     source_metadata_ciphertext = models.TextField(blank=True)
     evidence_capture = models.ForeignKey("EvidenceCapture", null=True, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
@@ -146,7 +146,7 @@ class EvidenceCapture(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(Organization, on_delete=models.PROTECT)
-    sha256 = models.CharField(max_length=64)
+    sha256 = models.CharField(max_length=80)
     metadata_ciphertext = models.TextField()
     bundle_sha256 = models.CharField(max_length=64)
     provenance = models.CharField(max_length=24)
@@ -335,8 +335,6 @@ class OrganizationSMTP(models.Model):
     security = models.CharField(max_length=12, default="starttls")
     enabled = models.BooleanField(default=True)
     revision = models.PositiveIntegerField(default=1)
-    otp_password_ciphertext = models.TextField(blank=True)
-    otp_transport_revision = models.PositiveIntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)
 
 

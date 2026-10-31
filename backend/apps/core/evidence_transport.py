@@ -1,11 +1,12 @@
 """Bounded HTTPS retrieval pinned to validated public DNS addresses."""
 
 import http.client
-import ipaddress
 import socket
 import ssl
 import time
 from urllib.parse import urljoin, urlsplit, urlunsplit
+
+from .public_network import public_address
 
 
 def checked_url(value: str) -> str:
@@ -27,7 +28,7 @@ def checked_url(value: str) -> str:
 class PublicHTTPS(http.client.HTTPSConnection):
     def connect(self):
         addresses = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
-        if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
+        if not addresses or any(not public_address(row[4][0]) for row in addresses):
             raise ValueError("Private or reserved network destinations are forbidden.")
         # One pinned address, no proxy environment variables and no second DNS lookup.
         family, kind, proto, _, address = addresses[0]

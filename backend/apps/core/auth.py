@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import secrets
 import time
 from datetime import timedelta
@@ -6,6 +8,7 @@ from urllib.parse import quote
 
 from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 from django.middleware.csrf import get_token
@@ -23,7 +26,6 @@ from .services import (
     audit,
     current_staff,
     digest,
-    keyed,
     lock_organization,
     login_rate_limit,
     queue_mail,
@@ -102,11 +104,11 @@ def recipient_session(request):
 
 @endpoint(["POST"])
 def setup(request):
+    rate_limit(request, "bootstrap", maximum=5)
     if not settings.SYNTHETIC_MODE or not operator_token_valid(
         request.data.get("setup_token", ""), settings.SETUP_TOKEN_SHA256
     ):
         raise Problem("Setup is unavailable.", status=404)
-    rate_limit(request, "bootstrap", maximum=5)
     data = validate(Credentials, request.data)
     email = data["email"].lower()
     if not is_company_address(email):
@@ -210,10 +212,23 @@ def enrollment(request):
 
 
 def verify_factor(user, token: str, *, allow_recovery: bool = True) -> bool:
-    if allow_recovery and user.mfa_confirmed:
-        candidate = keyed(f"recovery:{user.pk}:{token.upper()}")
+    if allow_recovery and user.mfa_confirmed and len(token) in {12, 32}:
         for stored in user.recovery_hashes:
-            if secrets.compare_digest(stored, candidate):
+            if stored.startswith("legacy-argon2$"):
+                accepted = any(
+                    check_password(
+                        hmac.new(
+                            key.encode(),
+                            f"recovery:{user.pk}:{token.upper()}".encode(),
+                            hashlib.sha256,
+                        ).hexdigest(),
+                        stored.removeprefix("legacy-argon2$"),
+                    )
+                    for key in [settings.SECRET_KEY, *settings.RECOVERY_LEGACY_KEYS]
+                )
+            else:
+                accepted = check_password(token.upper(), stored)
+            if accepted:
                 user.recovery_hashes = [item for item in user.recovery_hashes if item != stored]
                 user.save(update_fields=["recovery_hashes"])
                 return True
@@ -241,8 +256,8 @@ def verify_mfa(request):
         accepted = verify_factor(user, token)
         if accepted:
             if not user.mfa_confirmed:
-                codes = [secrets.token_hex(6).upper() for _ in range(8)]
-                user.recovery_hashes = [keyed(f"recovery:{user.pk}:{code}") for code in codes]
+                codes = [secrets.token_hex(16).upper() for _ in range(8)]
+                user.recovery_hashes = [make_password(code, hasher="argon2") for code in codes]
                 user.mfa_confirmed = True
                 user.save(update_fields=["recovery_hashes", "mfa_confirmed"])
                 audit(user.organization, user, "auth.mfa_enrolled", "account", user.pk)

@@ -113,11 +113,6 @@ def sender_profile(settings, tmp_path, monkeypatch, staff):
     OrganizationSMTP.objects.create(
         organization=staff.organization,
         host="smtp.example.test",
-        otp_transport_revision=1,
-        otp_password_ciphertext=crypto.encrypt(
-            b"synthetic-support-only",
-            crypto.context(staff.organization_id, "otp-smtp", staff.organization_id),
-        ),
     )
     StaffSMTP.objects.create(
         user=staff,

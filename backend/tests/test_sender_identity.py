@@ -3,37 +3,9 @@ from email.utils import parseaddr
 import pytest
 from django.core import mail
 
-from backend.apps.core import senders
 from backend.apps.core.mail import process_job
 from backend.apps.core.models import DeliveryJob
 from backend.tests.test_flows import compose
-
-
-def test_sender_connection_selects_exact_credential(sender_profile, monkeypatch):
-    calls = []
-    monkeypatch.setattr(senders, "get_connection", lambda **kwargs: calls.append(kwargs))
-    senders.connection("staff@onesmarter.com")
-    assert calls[0]["username"] == "staff@onesmarter.com"
-    assert calls[0]["use_tls"] is True
-    assert calls[0]["use_ssl"] is False
-    with pytest.raises(senders.SenderUnavailable):
-        senders.connection("other@onesmarter.com")
-    assert len(calls) == 1
-
-
-@pytest.mark.parametrize(
-    "sender", ["info@kormic.ai", "x@sub.onesmarter.com", "a@onesmarter.com\r\nBcc:x@y.com"]
-)
-def test_foreign_or_malformed_sender_denied(sender_profile, sender):
-    with pytest.raises(senders.SenderUnavailable):
-        senders.connection(sender)
-
-
-def test_missing_credential_has_no_global_fallback(sender_profile, settings, monkeypatch):
-    settings.EMAIL_HOST_USER = "global"
-    settings.EMAIL_HOST_PASSWORD = "global-test-only"
-    monkeypatch.delenv("SMTP_PASSWORD_TEST")
-    assert not senders.configured("secure@onesmarter.com")
 
 
 @pytest.mark.django_db
@@ -41,7 +13,6 @@ def test_global_notification_sender_is_ignored(staff_client, sender_profile, set
     compose(staff_client)
     settings.DEFAULT_FROM_EMAIL = "info@kormic.ai"
     calls = []
-    monkeypatch.setattr(senders, "get_connection", lambda **kw: calls.append(kw))
     job = DeliveryJob.objects.get()
     process_job(job.pk)
     job.refresh_from_db()

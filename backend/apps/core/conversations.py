@@ -36,6 +36,7 @@ from .services import (
     paginate,
     queue_mail,
     rate_limit,
+    verifier_matches,
 )
 
 
@@ -143,7 +144,7 @@ def owned(request, ident):
 def attachment_data(attachment, name=None):
     return {
         "id": str(attachment.pk),
-        "sha256": attachment.sha256,
+        "integrity_tag": attachment.sha256,
         "capture_id": str(attachment.evidence_capture_id)
         if attachment.evidence_capture_id
         else None,
@@ -765,6 +766,8 @@ def landing(request):
 
 
 def verification_grant(request, token):
+    if token:
+        return token_grant(token)
     # An idle session is only a routing hint for a new email challenge. It never
     # authorizes reading content. Revocation and conversation expiry still apply.
     session = (
@@ -805,7 +808,7 @@ def issue_code(request):
         )
         code = f"{secrets.randbelow(1000000):06d}"
         challenge = OTPChallenge(grant=grant, expires_at=timezone.now() + timedelta(minutes=10))
-        challenge.verifier = keyed(f"otp:{challenge.pk}:{code}")
+        challenge.verifier = keyed(f"otp:{challenge.pk}:{code}", purpose="otp")
         challenge.save()
         queue_mail(
             grant.conversation.organization,
@@ -846,8 +849,8 @@ def verify_code(request):
         )
         if challenge and challenge.expires_at > timezone.now() and challenge.attempts < 5:
             challenge.attempts += 1
-            accepted = secrets.compare_digest(
-                challenge.verifier, keyed(f"otp:{challenge.pk}:{data.get('code', '')}")
+            accepted = verifier_matches(
+                f"otp:{challenge.pk}:{data.get('code', '')}", challenge.verifier, purpose="otp"
             )
             if accepted:
                 challenge.consumed_at = timezone.now()
@@ -912,7 +915,10 @@ def recipient_logout(request):
     ident = request.session.pop("recipient_session", None)
     if ident:
         RecipientSession.objects.filter(pk=ident).update(revoked_at=timezone.now())
-    return Response({"locked": True})
+    request.session.flush()
+    response = Response({"locked": True})
+    response.delete_cookie("recipient_sessionid", path="/recipient-api/", samesite="Lax")
+    return response
 
 
 def upload_for(request, *, user=None, grant=None, captured_metadata=None):
@@ -959,7 +965,9 @@ def upload_for(request, *, user=None, grant=None, captured_metadata=None):
         if not accepted:
             audit(org, user or grant.pk, "attachment.rejected", "upload", "", outcome="denied")
             raise Problem("This file was rejected by the scanner.", "unsafe_file")
-        attachment.sha256 = evidence.digest(data)
+        from .integrity import tag
+
+        attachment.sha256 = tag(org.pk, data)
         attachment.source_metadata_ciphertext = crypto.encrypt(
             evidence.canonical(provenance), crypto.context(org.pk, "source-metadata", attachment.pk)
         )
@@ -1056,9 +1064,9 @@ def download(request, ident):
     content = crypto.decrypt(
         storage.get(attachment.object_key).decode(), attachment_context(attachment)
     )
-    from .evidence import digest
+    from .integrity import matches
 
-    if attachment.sha256 and digest(content) != attachment.sha256:
+    if attachment.sha256 and not matches(attachment.organization_id, content, attachment.sha256):
         raise Problem("File integrity verification failed.", "integrity_failed", 503)
     name = crypto.decrypt(
         attachment.name_ciphertext,

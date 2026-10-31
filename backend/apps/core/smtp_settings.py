@@ -1,6 +1,5 @@
 """Organisation SMTP transport and write-only, encrypted personal credentials."""
 
-import ipaddress
 import re
 import smtplib
 import socket
@@ -16,6 +15,7 @@ from .auth import recent_mfa, validate
 from .company_identity import is_company_address
 from .http import Problem, endpoint
 from .models import OrganizationSMTP, StaffSMTP
+from .public_network import public_address
 from .senders import SenderUnavailable
 from .services import audit, current_staff, lock_organization, rate_limit
 
@@ -26,7 +26,7 @@ def secret_context(user):
 
 def public_socket(host, port, timeout, source_address=None):
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
+    if not addresses or any(not public_address(row[4][0]) for row in addresses):
         raise OSError("SMTP host must resolve only to public addresses")
     last = None
     for family, kind, proto, _, address in addresses:

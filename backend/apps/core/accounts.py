@@ -391,6 +391,17 @@ def account_detail(request, ident):
             StaffInvitation.objects.filter(user=target, consumed_at=None).update(
                 consumed_at=timezone.now()
             )
+            if action == "reactivate":
+                if not actor.can_manage_privileges or target.pk == actor.pk:
+                    raise Problem(
+                        "A different privileged administrator must reactivate accounts.", status=403
+                    )
+                target.set_unusable_password()
+                target.mfa_secret = ""
+                target.mfa_confirmed = False
+                target.mfa_last_tick = -1
+                target.recovery_hashes = []
+                invite(target, actor, purpose="password_recovery")
         elif action == "reset_mfa":
             if not actor.can_manage_privileges or target.pk == actor.pk:
                 raise Problem("A different privileged administrator must reset MFA.", status=403)

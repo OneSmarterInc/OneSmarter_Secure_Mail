@@ -167,3 +167,5 @@ Evidence bundles and timestamp receipts retain their original authenticated enve
 
 
 SMTP credential verification, 31 October 2026: personal mailbox passwords are authenticated encrypted envelopes bound to organization and staff identity. The configured remote key service unwraps their data keys; a sealed service refuses new unwraps. Username/email remains routing metadata. SMTP backend close drops its password reference, including on close errors; Python does not guarantee zeroization of immutable strings, and sealing cannot revoke a password already released to an in-flight connection. No plaintext SMTP password is returned by settings APIs. A real disposable key-store regression verifies successful decryption, seal rejection for both notification and OTP paths, and recovery after unseal.
+
+See [Security hygiene remediation](QA_SECURITY_HYGIENE.md) for recovery-code migration, purpose-separated verifiers and document integrity-key rotation.

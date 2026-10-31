@@ -7,6 +7,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from django.utils.crypto import salted_hmac
 
 from . import crypto
 from .client_ip import client_ip
@@ -44,8 +45,24 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def keyed(value: str) -> str:
-    return hmac.new(settings.SECRET_KEY.encode(), value.encode(), hashlib.sha256).hexdigest()
+def keyed(value: str, *, purpose: str = "idempotency") -> str:
+    return salted_hmac(
+        f"onesmarter:{purpose}:v2", value, secret=settings.SECRET_KEY, algorithm="sha256"
+    ).hexdigest()
+
+
+def verifier_matches(value: str, stored: str, *, purpose: str) -> bool:
+    """Read compatibility for pre-domain-separation OTP/idempotency records only."""
+    if purpose not in {"otp", "idempotency"}:
+        raise ValueError("Unsupported legacy verifier purpose")
+    for secret in [settings.SECRET_KEY, *settings.SECRET_KEY_FALLBACKS]:
+        current = salted_hmac(
+            f"onesmarter:{purpose}:v2", value, secret=secret, algorithm="sha256"
+        ).hexdigest()
+        legacy = hmac.new(secret.encode(), value.encode(), hashlib.sha256).hexdigest()
+        if secrets.compare_digest(stored, current) or secrets.compare_digest(stored, legacy):
+            return True
+    return False
 
 
 @transaction.atomic
@@ -93,7 +110,7 @@ def rate_limit(
     with transaction.atomic():
         for value, allowance in buckets:
             capacity = allowance * period
-            key = keyed(f"token-rate:v1:{scope}:{value}")
+            key = keyed(f"token-rate:v1:{scope}:{value}", purpose="rate-limit")
             bucket, _ = RateBucket.objects.select_for_update().get_or_create(
                 key=key, defaults={"credits": capacity, "refilled_at": now}
             )
@@ -144,7 +161,11 @@ def idempotency(request, org, actor: str, operation: str, payload: dict):
     existing = IdempotencyRecord.objects.filter(
         organization=org, actor=actor, operation=operation, key=key
     ).first()
-    if existing and not secrets.compare_digest(existing.fingerprint, fingerprint):
+    if existing and not verifier_matches(
+        json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")),
+        existing.fingerprint,
+        purpose="idempotency",
+    ):
         raise Problem(
             "This submission key was already used with different data.", "idempotency_conflict", 409
         )

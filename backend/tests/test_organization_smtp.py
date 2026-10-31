@@ -223,11 +223,6 @@ def test_otp_mail_uses_support_mailbox(staff_client, staff, settings, monkeypatc
     OrganizationSMTP.objects.create(
         organization=staff.organization,
         host="smtp.example.com",
-        otp_transport_revision=1,
-        otp_password_ciphertext=crypto.encrypt(
-            b"support-secret",
-            crypto.context(staff.organization_id, "otp-smtp", staff.organization_id),
-        ),
     )
     assert personal(staff_client, staff.email).status_code == 200
     ident = compose(staff_client).json()["id"]
@@ -279,8 +274,6 @@ def test_otp_requires_owner_credentials_without_support_fallback(staff_client, s
     OrganizationSMTP.objects.create(
         organization=staff.organization,
         host="smtp.example.com",
-        otp_transport_revision=1,
-        otp_password_ciphertext="retired-value-must-not-be-used",
     )
     from backend.apps.core.senders import SenderUnavailable
 

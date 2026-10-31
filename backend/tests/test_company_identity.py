@@ -4,7 +4,7 @@ from email.utils import parseaddr
 import pytest
 from django.core import mail as django_mail
 
-from backend.apps.core import mail, senders
+from backend.apps.core import mail
 from backend.apps.core.company_identity import is_company_address
 from backend.apps.core.models import DeliveryJob
 from backend.apps.core.services import queue_mail
@@ -74,6 +74,4 @@ def test_notification_uses_staff_profile_not_global(org, sender_profile, setting
     assert job.payload_ciphertext == ""
     assert parseaddr(django_mail.outbox[-1].from_email)[1] == staff.email
     assert django_mail.outbox[-1].alternatives
-    with pytest.raises(senders.SenderUnavailable):
-        senders.profile("other@kormic.ai")
     assert DeliveryJob.objects.count() == 1

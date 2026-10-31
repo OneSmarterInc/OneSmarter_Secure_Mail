@@ -17,7 +17,9 @@ PQ_TRANSPORT_REQUIRED = (
     not SYNTHETIC_MODE or os.environ.get("PQ_TRANSPORT_REQUIRED", "false") == "true"
 )
 DEBUG = False
-ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
+ALLOWED_HOSTS = os.environ.get(
+    "ALLOWED_HOSTS", "localhost,127.0.0.1" + (",testserver" if ENVIRONMENT == "test" else "")
+).split(",")
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
 if not SECRET_KEY:
     secret_path = RUNTIME_DIR / "django.secret"
@@ -236,3 +238,14 @@ AUDIT_ARCHIVE_MAX_BATCHES = max(1, int(os.environ.get("AUDIT_ARCHIVE_MAX_BATCHES
 AUDIT_ARCHIVE_MAX_LAG_SECONDS = int(os.environ.get("AUDIT_ARCHIVE_MAX_LAG_SECONDS", "900"))
 STAFF_IDLE_SECONDS = max(60, int(os.environ.get("STAFF_IDLE_SECONDS", "900")))
 STAFF_ABSOLUTE_SECONDS = 8 * 60 * 60
+
+# Only needed until legacy recovery codes are replaced. Supply OLD keys before rotation.
+RECOVERY_LEGACY_KEYS = [key for key in os.environ.get("RECOVERY_LEGACY_KEYS", "").split(",") if key]
+DOCUMENT_INTEGRITY_KEY = os.environ.get(
+    "DOCUMENT_INTEGRITY_KEY",
+    "synthetic-test-integrity-key-not-for-production" if ENVIRONMENT == "test" else "",
+)
+
+SECRET_KEY_FALLBACKS = [
+    key for key in os.environ.get("DJANGO_SECRET_KEY_FALLBACKS", "").split(",") if key
+]

@@ -44,7 +44,10 @@ def test_original_hash_catalog_private_encrypted_bundle_and_export(staff_client,
         downloaded_at="2026-01-01T12:00:00Z",
     )
     capture = row.evidence_capture
-    assert row.sha256 == evidence.digest(b"original bytes")
+    from backend.apps.core.integrity import tag
+
+    assert row.sha256 == tag(row.organization_id, b"original bytes")
+    assert row.sha256 != evidence.digest(b"original bytes")
     raw = evidence.path_for(capture).read_bytes()
     assert b"original bytes" not in raw and b"example.com" not in raw
     catalog = staff_client.get("/api/evidence").json()
@@ -56,7 +59,9 @@ def test_original_hash_catalog_private_encrypted_bundle_and_export(staff_client,
     assert export.status_code == 200
     with zipfile.ZipFile(io.BytesIO(export.content)) as bundle:
         assert bundle.read("original/original.txt") == b"original bytes"
-        assert json.loads(bundle.read("manifest.json"))["sha256"] == row.sha256
+        assert json.loads(bundle.read("manifest.json"))["sha256"] == evidence.digest(
+            b"original bytes"
+        )
         assert b"PENDING" in bundle.read("README.txt")
 
 
