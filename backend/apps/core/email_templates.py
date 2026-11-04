@@ -21,7 +21,7 @@ def notification_html(data: dict, *, protected: bool) -> str:
         ):
             raise ValueError("Invalid notification link")
     code = ""
-    if data.get("challenge_id"):
+    if data.get("challenge_id") or data.get("portal_challenge_id"):
         match = re.search(r"one-time code is (\d{6})\.", data["body"])
         code = match.group(1) if match else ""
     action = "Open secure portal" if protected else "Continue to OneSmarter"

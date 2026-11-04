@@ -5,6 +5,7 @@ import smtplib
 import socket
 import ssl
 
+from django.conf import settings
 from django.core.mail.backends.smtp import EmailBackend
 from django.db import transaction
 from rest_framework import serializers
@@ -25,7 +26,8 @@ def secret_context(user):
 
 
 def public_socket(host, port, timeout, source_address=None):
-    addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    family = socket.AF_INET if getattr(settings, "SMTP_IPV4_ONLY", False) else socket.AF_UNSPEC
+    addresses = socket.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM)
     if not addresses or any(not public_address(row[4][0]) for row in addresses):
         raise OSError("SMTP host must resolve only to public addresses")
     last = None

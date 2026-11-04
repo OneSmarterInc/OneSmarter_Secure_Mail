@@ -102,6 +102,11 @@ class RecipientInvitationToken(models.Model):
 
 
 class Message(models.Model):
+    class Meta:
+        indexes = [
+            models.Index(fields=["conversation", "-created_at", "-id"], name="message_history_page")
+        ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     conversation = models.ForeignKey(
         Conversation, on_delete=models.PROTECT, related_name="messages"
@@ -402,3 +407,15 @@ class LoginFailureState(models.Model):
     user = models.OneToOneField(StaffUser, on_delete=models.CASCADE, primary_key=True)
     failures = models.PositiveIntegerField(default=0)
     window_started = models.DateTimeField(default=timezone.now)
+
+
+# Register the independently scoped integration inbox models.
+from .portal_models import (  # noqa: E402,F401
+    IntegrationNonce,
+    PortalChallenge,
+    PortalMailbox,
+    PortalMessage,
+    PortalParticipant,
+    PortalSession,
+    PortalThread,
+)

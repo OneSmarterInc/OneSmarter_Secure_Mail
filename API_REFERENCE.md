@@ -104,3 +104,25 @@ See [P2_REMEDIATION.md](P2_REMEDIATION.md) for capability configuration, require
 ## P3 hardening update
 
 See [P3_REMEDIATION.md](P3_REMEDIATION.md) for stable rotation IDs/expected versions, recipient URL cleanup, bounded encrypted-subject search, and deployment verification limits. Rotation retries must reuse the original operation parameters.
+# Partner inbox and independent integrations
+
+See `INTEGRATIONS.md` for deployment, signed-request protocol, key custody and testing mode.
+
+`POST /api/integrations/threads` is a server-to-server endpoint, independent of browser cookies/CSRF. Require TLS plus configured integration credentials: `X-Integration-Key`, `X-Integration-Time` (Unix seconds), `X-Integration-Nonce` (32 lowercase hex characters), and `X-Integration-Signature` (HMAC-SHA256 hex). Canonical bytes are newline-joined method, path, integration ID, timestamp, nonce, and lowercase SHA256 of the exact raw body. A nonce is usable once; timestamps allow five minutes of skew. The dedicated workload ingress requires mTLS; the staff/recipient browser hosts must not expose this endpoint.
+
+Payload: `{external_id, subject, body, participants:[{email,name,role:"requester"},{email,name,role:"provider"}]}`. The configured integration owner supplies the organization; the caller cannot choose a tenant or staff identity. This initial contract is two-party text only. Each sender must route only verified requester addresses and approved provider destinations. Reusing the same integration/external ID with different content returns 409. The service returns `{id,url,provider_notification}`; the URL never grants access.
+
+The `/recipient/inbox?source=selfpay` UI uses the existing recipient cookie boundary. These APIs require CSRF on unsafe methods:
+
+| Method | Route | Behavior |
+| --- | --- | --- |
+| GET | `/recipient-api/inbox/session` | CSRF bootstrap and verification state |
+| POST | `/recipient-api/inbox/code` | `{email,source}`; generic response even for unknown mailboxes; 60-second cooldown |
+| POST | `/recipient-api/inbox/verify` | `{code}`; browser-bound challenge, five guesses, ten-minute validity |
+| GET | `/recipient-api/inbox/threads?q=&offset=0` | Authorized inbox, newest activity first, unread marker; bounded search and `next_offset` |
+| GET | `/recipient-api/inbox/threads/{uuid}?before=` | Authorized messages, 50 per page, `next_before`; latest page marks read |
+| POST | `/recipient-api/inbox/threads/{uuid}` | `{body}`; `Idempotency-Key` required; two-party reply |
+| POST | `/recipient-api/inbox/activity` | User-driven renewal, capped at eight-hour absolute session lifetime |
+| POST | `/recipient-api/inbox/logout` | Revoke mailbox session and clear cookie |
+
+Mailbox sessions are separate from invitation/grant sessions and from staff authentication. Existing recipient invitation endpoints retain their original one-conversation authorization scope. Mailbox verification authorizes active memberships in that organization, not arbitrary threads, other mailboxes, other organizations or staff actions.

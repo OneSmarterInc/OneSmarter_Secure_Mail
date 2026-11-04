@@ -16,6 +16,7 @@ from .models import (
     StaffSMTP,
     StaffUser,
 )
+from .portal_models import PortalMailbox, PortalMessage, PortalThread
 from .services import audit, lock_organization
 
 
@@ -41,6 +42,9 @@ def migrate(org, *, apply=False, limit=100):
         "skipped_crypto_unavailable": 0,
     }
     specs = [
+        (PortalMailbox, "organization", [("email_ciphertext", lambda x: crypto.context(org.pk, "portal-email", x.pk))]),
+        (PortalThread, "organization", [("metadata_ciphertext", lambda x: crypto.context(org.pk, "portal-thread", x.pk))]),
+        (PortalMessage, "thread__organization", [("body_ciphertext", lambda x: crypto.context(org.pk, "portal-message", x.pk))]),
         (
             EvidenceCapture,
             "organization",

@@ -23,6 +23,7 @@ import { Accounts, AuditLogs } from "./pages/Access";
 import { EvidenceCatalog } from "./pages/EvidenceCatalog";
 import { Connections } from "./pages/Connections";
 import { Recipient } from "./pages/Recipient";
+import { PortalInbox } from "./pages/PortalInbox";
 
 class ErrorBoundary extends Component<
   { children: ReactNode },
@@ -583,7 +584,7 @@ function Application() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <Application />
+      {window.location.pathname === "/recipient/inbox" ? <PortalInbox /> : <Application />}
     </ErrorBoundary>
   );
 }

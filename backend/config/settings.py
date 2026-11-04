@@ -1,3 +1,4 @@
+import json as _integration_json
 """Explicit synthetic development configuration; production requires reviewed providers."""
 
 import os
@@ -249,3 +250,6 @@ DOCUMENT_INTEGRITY_KEY = os.environ.get(
 SECRET_KEY_FALLBACKS = [
     key for key in os.environ.get("DJANGO_SECRET_KEY_FALLBACKS", "").split(",") if key
 ]
+
+# Server-only partner integration credentials.
+SECURE_MAIL_INTEGRATIONS = _integration_json.loads(os.environ.get("SECURE_MAIL_INTEGRATIONS", "{}"))
