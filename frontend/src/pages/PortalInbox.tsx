@@ -25,6 +25,7 @@ type Message = {
 };
 type Participant = { name: string; email: string; mine: boolean; role: string };
 type Detail = {
+  provider_action?: { url: string; expires_at: number } | null;
   participants?: Participant[];
   request_summary?: string;
   id: string;
@@ -472,6 +473,21 @@ export function PortalInbox() {
                   </button>
                   <h2>{detail.subject}</h2>
                 </header>
+                {detail.provider_action && (
+                  <div className="partner-clinic-action">
+                    <span>
+                      Review this request and confirm the appointment.
+                    </span>
+                    <a
+                      href={detail.provider_action.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="button"
+                    >
+                      Review & confirm request
+                    </a>
+                  </div>
+                )}
                 {detail.request_summary && (
                   <details className="partner-summary">
                     <summary>

@@ -4645,3 +4645,26 @@ body:has(.partner-portal),
   font-size: 12px;
   color: var(--color-muted);
 }
+
+.partner-clinic-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-info-bg);
+  font-size: 13px;
+}
+.partner-clinic-action a {
+  background: var(--color-primary);
+  color: white;
+  min-height: 40px;
+  padding: 8px 12px;
+}
+@media (max-width: 720px) {
+  .partner-clinic-action {
+    padding: 10px 12px;
+  }
+}
