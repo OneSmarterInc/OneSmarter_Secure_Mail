@@ -5,10 +5,10 @@ SelfPay remains independently deployed. It owns the booking and its patient-emai
 ## Booking handoff
 
 1. The patient verifies their email and submits an appointment request in SelfPay.
-2. Only after the clinic approves the request, SelfPay records a `booking_chat` row in the same approval transaction. The clinic address comes exclusively from the approved server catalog; the patient address comes from the verified email proof.
-3. After commit, SelfPay signs an HTTPS request to `POST /api/integrations/threads`. The request contains the booking reference, patient name/phone, requested exam and three preferred windows, and the two participant addresses. Booking tracking tokens and clinic-preview capabilities are **not** transferred.
+2. After the verified patient submits the request, SelfPay records a `booking_chat` row in the same booking transaction. Direct clinic request emails are suppressed while this integration is enabled. The clinic address comes exclusively from the approved server catalog; the patient address comes from the verified email proof.
+3. After commit, SelfPay signs an HTTPS request to `POST /api/integrations/threads`. The request contains the booking reference, patient name/phone, requested exam and three preferred windows, and the two participant addresses. The provider confirmation URL is transferred separately as `provider_action: {url, expires_at}`. It is encrypted in thread metadata, excluded from email notifications and exposed only to the verified provider participant. Patient tracking tokens are not transferred.
 4. Secure Mail creates one encrypted thread, its participants, and generic notifications for both participants in a transaction. `(integration key ID, booking reference)` makes retries idempotent. Changed content under the same reference is rejected.
-5. SelfPay exposes the secure conversation link on approved patient and clinic dashboard requests. The URL contains only a thread ID and integration identifier. Neither identifies a logged-in user nor grants access. Both parties must verify their own mailbox in Secure Mail.
+5. SelfPay exposes the secure conversation link on patient and clinic dashboard requests before approval. The URL contains only a thread ID and integration identifier. Neither identifies a logged-in user nor grants access. Both parties must verify their own mailbox in Secure Mail.
 
 If Secure Mail is unavailable, the booking remains saved. The receipt shows that the chat is being prepared. A durable worker retries after 60 seconds. A crashed worker's lease expires after two minutes. Run the retry worker regularly; receipt polling does not initiate network writes.
 
@@ -16,7 +16,7 @@ Clinics with no approved scheduling email receive no chat handoff. Their receipt
 
 ## Testing mode and notifications
 
-For approved SelfPay bookings, configure `suppress_provider_notifications: false`. Secure Mail queues initial invitations for both participants and emails the other participant after a reply. Portal invitations, reply notifications and OTPs use `support@onesmarter.com` with the existing authorized SMTP transport. SelfPay patient/clinic verification mail uses its separately configured SMTP service.
+For submitted SelfPay bookings, configure `suppress_provider_notifications: false`. Secure Mail queues initial invitations for both participants and emails the other participant after a reply. Portal invitations, reply notifications and OTPs use `support@onesmarter.com` with the existing authorized SMTP transport. SelfPay patient/clinic verification mail uses its separately configured SMTP service.
 
 The default `suppress_provider_notifications: true` remains available for isolated testing. Suppression is captured on each participant and rechecked at delivery time. Enabling delivery does not replay existing suppressed invitations. Tests use synthetic mail; no external messages are sent by test suites.
 
@@ -47,7 +47,8 @@ Secure Mail uses a server-only `SECURE_MAIL_INTEGRATIONS` JSON mapping:
     "name": "MySelfPay",
     "owner_id": 123,
     "secret": "<same independent service secret>",
-    "suppress_provider_notifications": false
+    "suppress_provider_notifications": false,
+    "provider_action_origins": ["https://selfpay.example.com"]
   }
 }
 ```
@@ -87,3 +88,5 @@ Register each future project with a distinct integration ID, secret and authoriz
 ## Validation limits
 
 Tests use disposable SQLite databases and synthetic mailboxes, including real loopback HTTP and browser access. Production SMTP delivery, production TLS/proxy behavior, PostgreSQL concurrency and deployment migrations require staging validation. Passing these tests is not a claim of a complete security audit or production compliance certification.
+
+The clinic-only action links back to the existing SelfPay clinic verification/approval flow. The URL origin must match provider_action_origins exactly, and expired actions are omitted. Patients never receive this action in API responses or notifications. This change needs no schema migration beyond the existing portal migration.

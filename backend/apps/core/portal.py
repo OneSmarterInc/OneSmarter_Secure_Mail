@@ -8,7 +8,7 @@ import secrets
 import time
 import uuid
 from datetime import timedelta
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from django.conf import settings
 from django.core.validators import validate_email
@@ -241,11 +241,34 @@ def create_thread(request):
         "email"
     ] == normalized[1]["email"]:
         raise Problem("Distinct requester and provider mailboxes are required.")
+    provider_action = data.get("provider_action")
+    if provider_action is not None:
+        if not isinstance(provider_action, dict):
+            raise Problem("Invalid clinic action.")
+        action_url = field(provider_action, "url", 2048)
+        parsed = urlsplit(action_url)
+        action_origin = f"{parsed.scheme}://{parsed.netloc}"
+        allowed = config.get("provider_action_origins", [])
+        local = settings.SYNTHETIC_MODE and parsed.hostname in {"localhost", "127.0.0.1"}
+        expires = provider_action.get("expires_at")
+        if (
+            action_origin not in allowed
+            or parsed.username
+            or parsed.password
+            or (parsed.scheme != "https" and not (local and parsed.scheme == "http"))
+            or not isinstance(expires, (int, float))
+            or isinstance(expires, bool)
+            or not time.time() < expires < time.time() + 7 * 86400
+        ):
+            raise Problem("Invalid clinic action.")
+        provider_action = {"url": action_url, "expires_at": expires}
     canonical = {
         "subject": title,
         "body": body,
         "participants": sorted(normalized, key=lambda p: p["role"]),
     }
+    if provider_action is not None:
+        canonical["provider_action"] = provider_action
     fingerprint = keyed(json.dumps(canonical, sort_keys=True), purpose="portal-request")
     with transaction.atomic():
         lock_organization(owner.organization)
@@ -272,6 +295,8 @@ def create_thread(request):
             fingerprint=fingerprint,
         )
         metadata = {"subject": title, "source_name": config.get("name", source), "names": {}}
+        if provider_action is not None:
+            metadata["provider_action"] = provider_action
         thread.metadata_ciphertext = ""
         thread.save()
         for person in normalized:
@@ -340,8 +365,17 @@ def session_status(request):
     except Problem:
         return Response({"csrf": get_token(request), "verified": False})
     return Response(
-        {"csrf": get_token(request), "verified": True, "expires_at": session.expires_at.isoformat(),
-         "email": decrypt(session.mailbox.email_ciphertext, session.mailbox.organization_id, "portal-email", session.mailbox_id)}
+        {
+            "csrf": get_token(request),
+            "verified": True,
+            "expires_at": session.expires_at.isoformat(),
+            "email": decrypt(
+                session.mailbox.email_ciphertext,
+                session.mailbox.organization_id,
+                "portal-email",
+                session.mailbox_id,
+            ),
+        }
     )
 
 
@@ -606,16 +640,39 @@ def thread_detail(request, ident):
             thread.pk,
         )
         participants = [
-            {"name": info["names"].get(str(person.mailbox_id), "Participant"),
-             "email": decrypt(person.mailbox.email_ciphertext, thread.organization_id, "portal-email", person.mailbox_id),
-             "mine": person.mailbox_id == session.mailbox_id, "role": person.role}
-            for person in thread.participants.filter(revoked_at=None, mailbox__disabled_at=None).select_related("mailbox")
+            {
+                "name": info["names"].get(str(person.mailbox_id), "Participant"),
+                "email": decrypt(
+                    person.mailbox.email_ciphertext,
+                    thread.organization_id,
+                    "portal-email",
+                    person.mailbox_id,
+                ),
+                "mine": person.mailbox_id == session.mailbox_id,
+                "role": person.role,
+            }
+            for person in thread.participants.filter(
+                revoked_at=None, mailbox__disabled_at=None
+            ).select_related("mailbox")
         ]
         initial = thread.messages.filter(sender=None, submission_key="initial").first()
-        request_summary = decrypt(initial.body_ciphertext, thread.organization_id, "portal-message", initial.pk) if initial else ""
+        request_summary = (
+            decrypt(initial.body_ciphertext, thread.organization_id, "portal-message", initial.pk)
+            if initial
+            else ""
+        )
+        action = info.get("provider_action")
+        provider_action_result = None
+        if member.role == "provider" and action and action.get("expires_at", 0) > time.time():
+            action_origin = urlsplit(action["url"])
+            if f"{action_origin.scheme}://{action_origin.netloc}" in integration(thread.source).get(
+                "provider_action_origins", []
+            ):
+                provider_action_result = action
         return Response(
             {
                 "id": str(thread.pk),
+                "provider_action": provider_action_result,
                 "subject": info["subject"],
                 "participants": participants,
                 "request_summary": request_summary,

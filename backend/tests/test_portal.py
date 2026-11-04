@@ -340,3 +340,35 @@ def test_message_history_pagination_and_eight_hour_limit(configured):
         expires_at=timezone.now() + timedelta(minutes=10),
     )
     assert patient.get("/recipient-api/inbox/threads").status_code == 401
+
+
+def test_confirmation_action_is_clinic_only_and_not_in_notifications(configured, settings):
+    settings.SECURE_MAIL_INTEGRATIONS['selfpay']['provider_action_origins'] = ['https://selfpay.example.test']
+    settings.SECURE_MAIL_INTEGRATIONS['selfpay']['suppress_provider_notifications'] = False
+    data = payload('MSP-CONFIRM')
+    action = {'url': 'https://selfpay.example.test/#clinic/MSP-CONFIRM/private-test-token', 'expires_at': time.time()+3600}
+    data['provider_action'] = action
+    response = signed(Client(), data)
+    assert response.status_code == 201, response.content
+    ident = response.json()['id']
+    assert signed(Client(), data).json()['id'] == ident
+    assert all('private-test-token' not in json.dumps(mail.payload(job)) for job in DeliveryJob.objects.all())
+    assert 'private-test-token' not in PortalThread.objects.get(pk=ident).metadata_ciphertext
+    patient, _ = login('patient@example.test')
+    clinic, _ = login('clinic@example.test')
+    patient_detail = patient.get('/recipient-api/inbox/threads/'+ident)
+    assert patient_detail.status_code == 200
+    assert patient_detail.json()['provider_action'] is None
+    assert 'private-test-token' not in patient_detail.content.decode()
+    assert clinic.get('/recipient-api/inbox/threads/'+ident).json()['provider_action'] == action
+    settings.SECURE_MAIL_INTEGRATIONS['selfpay']['provider_action_origins'] = []
+    assert clinic.get('/recipient-api/inbox/threads/'+ident).json()['provider_action'] is None
+
+
+def test_confirmation_action_requires_allowed_origin(configured, settings):
+    settings.SECURE_MAIL_INTEGRATIONS['selfpay']['provider_action_origins'] = ['https://selfpay.example.test']
+    for url in ['https://untrusted.example.test/confirm', 'javascript:alert(1)', 'https://user:pass@selfpay.example.test/confirm']:
+        data = payload()
+        data['provider_action'] = {'url': url, 'expires_at': time.time()+3600}
+        assert signed(Client(), data).status_code == 400
+    assert PortalThread.objects.count() == 0
