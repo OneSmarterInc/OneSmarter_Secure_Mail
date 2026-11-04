@@ -1,5 +1,21 @@
 # Security acceptance validation — 2026-11-04
 
+## RP-03 follow-up: validate content fields before key access
+
+`crypto.content_fields` requires a canonical base64 nonce of exactly 12 bytes using `protocol.decode(..., 12)`. Ciphertext must be a base64 string with at least 16 decoded bytes for the GCM authentication tag; noncanonical encodings are rejected. `decrypt` and `rewrap` validate these fields before `unwrap`. `decrypt_many` validates every envelope in a chunk before its `unwrap-batch` request and reuses the decoded fields. A bad later chunk cannot prevent requests already completed for earlier valid chunks; no malformed chunk is submitted to the key service.
+
+Validation: **100 tests passed** across the new content-field regressions, existing crypto/known-answer tests, batch-decryption tests and RP-02 outbox regressions. `test_rp03_content_nonce_length_checked_before_unwrap` covers lengths 0, 8, 11, 13, 16 and 128 across decrypt, rewrap and batching, with assertions that neither unwrap nor key-service/key-selection functions run. Invalid encodings, non-string values, short tags and a malformed last batch item also fail before key access. Valid empty plaintext (16-byte tag-only ciphertext) still decrypts and rewraps without changing its nonce or ciphertext. Evidence: `.runtime/rp03-validation.xml`. Both Ruff checks pass. The earlier RP-06 GitHub run predates this local follow-up.
+
+## RP-02 follow-up: isolate outbox failures
+
+`mail.process_job` now checks custody readiness for every job, including jobs without a conversation. A previous positive batch result cannot authorize later work after sealing. Unverifiable/deformed payloads are marked `failed` with `payload_unverifiable` only when custody still reports ready; if custody becomes unavailable, the job remains retryable with a 15-second backoff and its encrypted payload retained. Credential/attachment decryption failures during sealing also retry, and readiness is checked again before opening SMTP.
+
+The batch isolates unexpected exceptions per job, logs only a fixed event and the job identifier, and backs off jobs still queued/retry. It never blindly requeues `sending` jobs: existing stale-job recovery preserves ambiguous delivery outcomes as `uncertain`. Per-job and pre-SMTP readiness checks cost additional status operations; that is intentional to avoid trusting a stale batch-wide readiness result. A seal cannot undo an already in-flight SMTP submission.
+
+Validation: **85 targeted tests passed**, including `test_rp02_poison_outbox_job_must_not_block_later_jobs` with tampered ciphertext, invalid JSON and non-object payloads, each followed by an actual queued OTP and notifications. Tests also cover sealed jobs with no conversation, resume after unseal, sealing between admission/decryption/SMTP open, mid-batch sealing, log redaction and preservation of possibly submitted jobs. Another **33 existing flow/shared-mail tests passed**. Evidence: `.runtime/rp02-verified.xml` and `.runtime/rp02-flows.xml`. Both Ruff checks passed. Tests use synthetic fixtures/captured SMTP; no real email was sent. The RP-06 CI run below predates RP-02 and is not evidence for this follow-up.
+
+RP-06 follow-up: all eight GitHub Actions jobs passed together on commit `946ea0aae3cb60b22ff116420399cb8cbe84fc28`. See [CI_VALIDATION.md](CI_VALIDATION.md) for the exact run URL, retained logs and PostgreSQL/nginx/ClamAV/browser/security evidence. Earlier local-only infrastructure gaps below are historical; CI success still does not establish production deployment or independent approval.
+
 ## RP-01 follow-up: explicit application environment
 
 Resolved: Django now raises `ImproperlyConfigured` for missing, empty or whitespace-only `APP_ENV` before selecting synthetic mode or loading local key/cookie defaults. An explicit value in the root `.env` is accepted when dotenv loading is enabled; process environment still takes precedence. No initializer silently assumes development: local initialization requires an explicit development/test selection, and container initialization requires explicit development. The example environment, Compose profile, CI browser environment and local startup instructions document or supply the selection. Existing production/PQ startup restrictions remain unchanged.

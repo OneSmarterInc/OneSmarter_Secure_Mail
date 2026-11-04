@@ -13,13 +13,13 @@ pytestmark = pytest.mark.django_db
 
 
 @pytest.mark.parametrize("ready", [True, False])
-def test_batch_checks_readiness_once(staff_client, monkeypatch, ready):
+def test_batch_checks_readiness_for_each_job(staff_client, monkeypatch, ready):
     for _ in range(4):
         assert compose(staff_client).status_code == 201
     check = Mock(return_value=ready)
     monkeypatch.setattr(document_service, "ready", check)
     mail.process_pending()
-    assert check.call_count == 1
+    assert check.call_count == 4
     assert (
         DeliveryJob.objects.filter(state="development_delivered" if ready else "queued").count()
         == 4

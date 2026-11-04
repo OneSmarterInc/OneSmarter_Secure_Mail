@@ -1,4 +1,5 @@
 import json
+import logging
 import smtplib
 import time
 from datetime import timedelta
@@ -6,7 +7,7 @@ from email.utils import formataddr
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.utils import timezone
 
 from . import crypto, document_service, senders, smtp_settings, storage
@@ -22,6 +23,8 @@ from .models import (
 from .outbox_lock import outbox_lock
 from .services import audit, digest
 
+logger = logging.getLogger("securemail")
+
 
 def payload(job):
     return json.loads(
@@ -32,11 +35,10 @@ def payload(job):
 
 
 def process_job(job_id, *, service_ready=None):
-    if service_ready is None:
-        has_conversation = DeliveryJob.objects.filter(
-            pk=job_id, conversation__isnull=False
-        ).exists()
-        service_ready = document_service.ready() if has_conversation else True
+    # A previous positive batch result cannot authorize fresh work after sealing.
+    # A negative hint may defer work without contacting custody again.
+    if service_ready is not False:
+        service_ready = document_service.ready()
     with transaction.atomic():
         job = (
             DeliveryJob.objects.select_for_update(of=("self",))
@@ -45,7 +47,7 @@ def process_job(job_id, *, service_ready=None):
         )
         if job.state not in {"queued", "retry"} or job.next_attempt > timezone.now():
             return
-        if job.conversation_id and not service_ready:
+        if not service_ready:
             job.error_code = "service_disabled"
             job.next_attempt = timezone.now() + timedelta(seconds=15)
             job.save(update_fields=["error_code", "next_attempt", "updated_at"])
@@ -66,7 +68,21 @@ def process_job(job_id, *, service_ready=None):
             job.state = "cancelled"
             job.save()
             return
-        data = payload(job)
+        try:
+            data = payload(job)
+            if not isinstance(data, dict):
+                raise ValueError("Delivery payload must be an object")
+        except (crypto.CryptoUnavailable, ValueError, TypeError):
+            # Custody may have sealed after admission. Do not terminally fail
+            # healthy ciphertext during an outage; retry without contacting SMTP.
+            if not document_service.ready():
+                job.error_code = "service_disabled"
+                job.next_attempt = timezone.now() + timedelta(seconds=15)
+            else:
+                job.state, job.error_code = "failed", "payload_unverifiable"
+            job.save(update_fields=["state", "error_code", "next_attempt", "updated_at"])
+            logger.error("delivery.payload_unavailable job_id=%s", job.pk)
+            return
         from .portal import delivery_allowed
 
         if not delivery_allowed(data, job):
@@ -200,6 +216,8 @@ def process_job(job_id, *, service_ready=None):
                     crypto.context(attachment.organization_id, "filename", attachment.pk),
                 ).decode()
                 message.attach(name, document, attachment.media_type)
+            if not document_service.ready():
+                raise document_service.ServiceDisabled()
             smtp_connection.open()  # Connect, TLS and authenticate before submission.
             submission_started = True
             if message.send(fail_silently=False) != 1:
@@ -208,6 +226,12 @@ def process_job(job_id, *, service_ready=None):
         error = ""
     except document_service.ServiceDisabled:
         state, error = "retry", "service_disabled"
+    except crypto.CryptoUnavailable:
+        # Credentials and attachments also decrypt after initial admission.
+        if not document_service.ready():
+            state, error = "retry", "service_disabled"
+        else:
+            state, error = "failed", "delivery_unverifiable"
     except senders.SenderUnavailable:
         state, error = "failed", "sender_not_configured"
     except smtplib.SMTPAuthenticationError:
@@ -266,14 +290,27 @@ def _process_batch():
     jobs = list(
         DeliveryJob.objects.filter(state__in=["queued", "retry"], next_attempt__lte=timezone.now())
         .order_by("next_attempt", "created_at", "pk")
-        .values_list("pk", "conversation_id")[:100]
+        .values_list("pk", flat=True)[:100]
     )
-    ready = document_service.ready() if any(conversation for _, conversation in jobs) else True
     deadline = time.monotonic() + 30
-    for ident, _ in jobs:
+    for ident in jobs:
         if time.monotonic() >= deadline:
             break
-        process_job(ident, service_ready=ready)
+        try:
+            process_job(ident)
+        except Exception:
+            # Exception text/tracebacks may contain payloads, addresses or tokens.
+            logger.error("delivery.job_processing_failed job_id=%s", ident)
+            try:
+                # A rolled-back pre-send failure must not monopolize the next
+                # batch. Never requeue 'sending': SMTP acceptance may be unknown.
+                DeliveryJob.objects.filter(pk=ident, state__in=["queued", "retry"]).update(
+                    error_code="job_processing_failed",
+                    next_attempt=timezone.now() + timedelta(seconds=15),
+                    updated_at=timezone.now(),
+                )
+            except DatabaseError:
+                logger.error("delivery.job_backoff_failed job_id=%s", ident)
     DeliveryJob.objects.filter(created_at__lt=timezone.now() - timedelta(days=1)).exclude(
         payload_ciphertext=""
     ).exclude(state__in=["queued", "retry"]).update(payload_ciphertext="")

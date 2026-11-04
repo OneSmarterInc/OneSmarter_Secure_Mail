@@ -140,12 +140,23 @@ def encrypt(data: bytes, context: str) -> str:
         raise CryptoUnavailable("Encryption or key protection is unavailable.") from exc
 
 
+def content_fields(envelope: dict) -> tuple[bytes, bytes]:
+    """Validate public content encoding before requesting any decryption key."""
+    nonce = protocol.decode(envelope["nonce"], 12)
+    encoded = envelope["data"]
+    if not isinstance(encoded, str):
+        raise ValueError("Invalid content encoding.")
+    data = unb64(encoded)
+    if len(data) < 16 or b64(data) != encoded:
+        raise ValueError("Invalid ciphertext or missing authentication tag.")
+    return nonce, data
+
+
 def decrypt(value: str, context: str) -> bytes:
     try:
         envelope = protocol.parse_object(value)
-        return AESGCM(unwrap(envelope, context)).decrypt(
-            unb64(envelope["nonce"]), unb64(envelope["data"]), context.encode()
-        )
+        nonce, data = content_fields(envelope)
+        return AESGCM(unwrap(envelope, context)).decrypt(nonce, data, context.encode())
     except ERRORS as exc:
         raise CryptoUnavailable("Protected content could not be verified.") from exc
 
@@ -165,6 +176,7 @@ def decrypt_many(values: list[tuple[str, str]]) -> list[bytes]:
             if len(orgs) != 1:
                 raise ValueError("Batch must have a single organization")
             envelopes = [protocol.parse_object(value) for value, _ in batch]
+            contents = [content_fields(envelope) for envelope in envelopes]
             items = []
             for envelope, (_, context) in zip(envelopes, batch, strict=True):
                 if set(envelope) != protocol.WRAPPER | {"nonce", "data"}:
@@ -176,11 +188,9 @@ def decrypt_many(values: list[tuple[str, str]]) -> list[bytes]:
             deks = response["deks"]
             if not isinstance(deks, list) or len(deks) != len(batch):
                 raise ValueError("Invalid batch response")
-            for envelope, (_, context), dek in zip(envelopes, batch, deks, strict=True):
+            for (nonce, data), (_, context), dek in zip(contents, batch, deks, strict=True):
                 results.append(
-                    AESGCM(protocol.decode(dek, 32)).decrypt(
-                        unb64(envelope["nonce"]), unb64(envelope["data"]), context.encode()
-                    )
+                    AESGCM(protocol.decode(dek, 32)).decrypt(nonce, data, context.encode())
                 )
         decoded = dict(zip(unique, results, strict=True))
         return [decoded[item] for item in values]
@@ -192,10 +202,9 @@ def rewrap(value: str, context: str) -> str:
     """Replace the wrapped data key while preserving file ciphertext, nonce and key."""
     try:
         envelope = protocol.parse_object(value)
+        nonce, data = content_fields(envelope)
         data_key = unwrap(envelope, context)
-        AESGCM(data_key).decrypt(
-            unb64(envelope["nonce"]), unb64(envelope["data"]), context.encode()
-        )
+        AESGCM(data_key).decrypt(nonce, data, context.encode())
         key = keyring.active_key(organization(context))
         return canonical(
             {**wrap(data_key, context, key), "nonce": envelope["nonce"], "data": envelope["data"]}

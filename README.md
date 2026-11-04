@@ -29,7 +29,7 @@ From this repository folder, with Python 3.12 and Node 24:
 ```powershell
 python -m venv .venv
 $env:APP_ENV = 'development'
-.\.venv\Scripts\python.exe -m pip install -r requirements.lock
+.\.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r requirements.lock
 .\.venv\Scripts\python.exe scripts/init_local.py
 .\.venv\Scripts\python.exe manage.py migrate
 .\.venv\Scripts\python.exe manage.py runserver 127.0.0.1:8000 --noreload
