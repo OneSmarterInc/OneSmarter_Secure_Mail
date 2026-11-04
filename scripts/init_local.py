@@ -7,6 +7,16 @@ from pathlib import Path
 
 from dotenv import dotenv_values, set_key
 
+config = Path(__file__).resolve().parents[1] / ".env"
+file_values = (
+    dotenv_values(config, interpolate=False)
+    if os.environ.get("DJANGO_READ_DOT_ENV", "true").lower() != "false"
+    else {}
+)
+environment = os.environ.get("APP_ENV", file_values.get("APP_ENV"))
+if environment not in {"development", "test"}:
+    raise SystemExit("Set APP_ENV explicitly to development or test for synthetic initialization.")
+
 root = Path(
     os.environ.get("APP_RUNTIME_DIR", str(Path(__file__).resolve().parents[1] / ".runtime"))
 )
@@ -25,9 +35,8 @@ for name, value in {
 print("Local synthetic-mode configuration initialized; secrets were not printed.")
 
 
-config = Path(__file__).resolve().parents[1] / ".env"
 if (
-    os.environ.get("APP_ENV") != "test"
+    environment != "test"
     and not os.environ.get("DOCUMENT_INTEGRITY_KEY")
     and not dotenv_values(config).get("DOCUMENT_INTEGRITY_KEY")
 ):

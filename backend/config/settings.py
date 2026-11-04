@@ -1,6 +1,6 @@
-import json as _integration_json
 """Explicit synthetic development configuration; production requires reviewed providers."""
 
+import json as _integration_json
 import os
 from ipaddress import ip_address
 from pathlib import Path
@@ -12,7 +12,9 @@ from .environment import load_environment
 BASE_DIR = Path(__file__).resolve().parents[2]
 load_environment(BASE_DIR)
 RUNTIME_DIR = Path(os.environ.get("APP_RUNTIME_DIR", str(BASE_DIR / ".runtime")))
-ENVIRONMENT = os.environ.get("APP_ENV", "development")
+ENVIRONMENT = os.environ.get("APP_ENV")
+if not ENVIRONMENT or not ENVIRONMENT.strip():
+    raise ImproperlyConfigured("APP_ENV must be explicitly set; no default environment is allowed.")
 SYNTHETIC_MODE = ENVIRONMENT in {"development", "test"}
 PQ_TRANSPORT_REQUIRED = (
     not SYNTHETIC_MODE or os.environ.get("PQ_TRANSPORT_REQUIRED", "false") == "true"
@@ -57,7 +59,10 @@ INSTALLED_APPS = [
     "rest_framework",
     "backend.apps.core",
 ]
+PERFORMANCE_TIMINGS = os.environ.get("PERFORMANCE_TIMINGS", "1") == "1"
+PERFORMANCE_LOG_THRESHOLD_MS = int(os.environ.get("PERFORMANCE_LOG_THRESHOLD_MS", "250"))
 MIDDLEWARE = [
+    "backend.performance.PerformanceMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "backend.apps.core.middleware.PortalSessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -202,6 +207,17 @@ CELERY_BROKER_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
+# The database outbox and beat remain the recovery path if broker wakeup fails.
+OUTBOX_IMMEDIATE_DISPATCH = (
+    os.environ.get("OUTBOX_IMMEDIATE_DISPATCH", "0" if SYNTHETIC_MODE else "1") == "1"
+)
+CELERY_BROKER_CONNECTION_TIMEOUT = 1
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "socket_connect_timeout": 1,
+    "socket_timeout": 1,
+    "queue_order_strategy": "priority",
+}
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BEAT_SCHEDULE = {
     "transient-cleanup": {"task": "securemail.cleanup_transient", "schedule": 900.0},
     "outbox": {"task": "securemail.process_pending", "schedule": 10.0, "options": {"expires": 10}},
@@ -251,5 +267,6 @@ SECRET_KEY_FALLBACKS = [
     key for key in os.environ.get("DJANGO_SECRET_KEY_FALLBACKS", "").split(",") if key
 ]
 
-# Server-only partner integration credentials.
+
+# Server-only integration credentials; never serialize these settings to browsers.
 SECURE_MAIL_INTEGRATIONS = _integration_json.loads(os.environ.get("SECURE_MAIL_INTEGRATIONS", "{}"))

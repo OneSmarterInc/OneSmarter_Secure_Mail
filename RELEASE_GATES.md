@@ -1,5 +1,8 @@
 # Production release gates
 
+2026-11-04 addendum: [SECURITY_VALIDATION.md](SECURITY_VALIDATION.md) records current synthetic acceptance checks, external audit-checkpoint support and remaining operational/independent approvals. The production startup block remains. A checkpoint protects an audit-history prefix, not every database row or events after its position.
+
+
 Updated 2026-10-28. This repository provides a functioning synthetic development application. It must not handle real confidential documents yet. `APP_ENV` values other than `development` and `test` deliberately fail startup. Do not remove that gate simply to deploy.
 
 Internal review on 2026-10-28 reproduced four code defects, subsequently repaired: legacy local-key reads in service mode, sealing limited to one store instance, unbounded version-history responses, and missing audit-chain verification on unseal. See [ENCRYPTION_REVIEW.md](ENCRYPTION_REVIEW.md) for repairs and regression evidence. Independent cryptographic review, external audit checkpoints/rollback detection, approved PQ transport and deployment evidence remain required; passing tests are not release approval.

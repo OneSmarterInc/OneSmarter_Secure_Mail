@@ -59,8 +59,10 @@ def test_root_rotation_retains_backups_until_verified_recovery(tmp_path, monkeyp
     root_id = store.root_id
     with pytest.raises(ValueError, match="previous root rotation"):
         store.rotate_root(secrets.token_bytes(32), root_id, "custodian")
+    anchor = tmp_path / "trusted-checkpoint.json"
+    store.export_checkpoint(anchor)
     store.seal("restart")
-    store = KeyStore(store.path, store.backup_directory)
+    store = KeyStore(store.path, store.backup_directory, trusted_checkpoint=anchor)
     from backend.keyservice.ownership import StoreOwnership
 
     owner = StoreOwnership(store.path)
@@ -77,9 +79,12 @@ def test_root_rotation_retains_backups_until_verified_recovery(tmp_path, monkeyp
         store.verify_root_recovery(old, root_id, tmp_path / "wrong.sqlite3", "custodian")
     assert all(path.exists() for path in old_paths)
     with monkeypatch.context() as patch:
-        patch.setattr(
-            KeyStore, "restore", lambda *args: (_ for _ in ()).throw(OSError("Restore failed"))
-        )
+
+        def failed_restore(*args, trusted_checkpoint):
+            assert trusted_checkpoint == anchor
+            raise OSError("Restore failed")
+
+        patch.setattr(KeyStore, "restore", failed_restore)
         with pytest.raises(OSError, match="Restore failed"):
             store.verify_root_recovery(new, root_id, tmp_path / "failed.sqlite3", "custodian")
     assert all(path.exists() for path in old_paths)

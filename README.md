@@ -28,6 +28,7 @@ From this repository folder, with Python 3.12 and Node 24:
 
 ```powershell
 python -m venv .venv
+$env:APP_ENV = 'development'
 .\.venv\Scripts\python.exe -m pip install -r requirements.lock
 .\.venv\Scripts\python.exe scripts/init_local.py
 .\.venv\Scripts\python.exe manage.py migrate
@@ -37,6 +38,7 @@ python -m venv .venv
 In a second terminal in the same folder:
 
 ```powershell
+$env:APP_ENV = 'development'
 .\.venv\Scripts\python.exe manage.py runworker
 ```
 
@@ -70,6 +72,7 @@ Docker was unavailable on the development host, so the Compose stack is supplied
 ## Verify
 
 ```powershell
+$env:APP_ENV = 'test'
 .\.venv\Scripts\python.exe manage.py check
 .\.venv\Scripts\python.exe manage.py makemigrations --check --dry-run
 .\.venv\Scripts\python.exe -m ruff check backend scripts

@@ -279,7 +279,10 @@ export function Recipient({ token }: { token: string }) {
         ) : conversation ? (
           <>
             {view === "catalog" && (
-              <RecipientCatalog conversation={conversation} />
+              <RecipientCatalog
+                key={conversation.id}
+                conversation={conversation}
+              />
             )}
             <div
               className="recipient-chat-view"

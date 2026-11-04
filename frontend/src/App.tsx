@@ -584,7 +584,11 @@ function Application() {
 export default function App() {
   return (
     <ErrorBoundary>
-      {window.location.pathname === "/recipient/inbox" ? <PortalInbox /> : <Application />}
+      {window.location.pathname === "/recipient/inbox" ? (
+        <PortalInbox />
+      ) : (
+        <Application />
+      )}
     </ErrorBoundary>
   );
 }

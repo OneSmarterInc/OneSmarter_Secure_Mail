@@ -16,7 +16,7 @@ import {
   useResource,
   useDocumentService,
 } from "../api";
-import type { Conversation, FileItem, Page, User } from "../types";
+import type { Conversation, Delivery, FileItem, Page, User } from "../types";
 import {
   Badge,
   Empty,
@@ -640,6 +640,48 @@ export function ThreadContent({
   recipientMode?: boolean;
 }) {
   const threadRef = useRef<HTMLDivElement>(null);
+  const [history, setHistory] = useState<Conversation | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const historyRequest = useRef<AbortController | null>(null);
+  useEffect(() => {
+    historyRequest.current?.abort();
+    setHistory(null);
+    setHistoryBusy(false);
+    setHistoryError("");
+    return () => historyRequest.current?.abort();
+  }, [conversation]);
+  const cursor =
+    history?.next_messages_cursor ??
+    (history ? null : conversation.next_messages_cursor);
+  async function olderMessages() {
+    if (!cursor || historyBusy) return;
+    const controller = new AbortController();
+    historyRequest.current = controller;
+    setHistoryBusy(true);
+    setHistoryError("");
+    try {
+      const path = recipientMode
+        ? "/recipient/conversation"
+        : `/conversations/${conversation.id}`;
+      const page = await api<Conversation>(
+        `${path}?before=${encodeURIComponent(cursor)}`,
+        { signal: controller.signal },
+      );
+      if (!controller.signal.aborted)
+        setHistory((old) => ({
+          ...page,
+          messages: [...(old?.messages ?? []), ...(page.messages ?? [])],
+        }));
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setHistory(null);
+        setHistoryError((err as Error).message);
+      }
+    } finally {
+      if (!controller.signal.aborted) setHistoryBusy(false);
+    }
+  }
   useLayoutEffect(() => {
     const pane = threadRef.current?.closest<HTMLElement>(
       ".conversation-stream",
@@ -750,7 +792,7 @@ export function ThreadContent({
   return (
     <div className="thread" ref={threadRef}>
       <ErrorNotice message={downloadError} />
-      {[...(conversation.messages ?? [])]
+      {[...(conversation.messages ?? []), ...(history?.messages ?? [])]
         .reverse()
         .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
         .map((message) => (
@@ -881,6 +923,16 @@ export function ThreadContent({
             </div>
           </article>
         ))}
+      <ErrorNotice message={historyError} />
+      {cursor && (
+        <button
+          type="button"
+          disabled={historyBusy}
+          onClick={() => void olderMessages()}
+        >
+          {historyBusy ? "Loading older messages…" : "Load older messages"}
+        </button>
+      )}
     </div>
   );
 }
@@ -1192,6 +1244,37 @@ export function MailDetail({ id }: { id: string }) {
     refresh,
     true,
   );
+  const [deliveryPage, setDeliveryPage] = useState(1);
+  const [olderDeliveries, setOlderDeliveries] = useState<Delivery[]>([]);
+  const [deliveryBusy, setDeliveryBusy] = useState(false);
+  const deliveryController = useRef<AbortController | null>(null);
+  useEffect(() => {
+    deliveryController.current?.abort();
+    setOlderDeliveries([]);
+    setDeliveryPage(1);
+    setDeliveryBusy(false);
+    return () => deliveryController.current?.abort();
+  }, [id, refresh]);
+  async function loadDeliveryHistory() {
+    if (deliveryBusy) return;
+    const controller = new AbortController();
+    deliveryController.current = controller;
+    setDeliveryBusy(true);
+    try {
+      const data = await api<Page<Delivery>>(
+        `/conversations/${id}/delivery?page_size=100&page=${deliveryPage + 1}`,
+        { signal: controller.signal },
+      );
+      if (!controller.signal.aborted) {
+        setOlderDeliveries((old) => [...old, ...data.results]);
+        setDeliveryPage((old) => old + 1);
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) setError((err as Error).message);
+    } finally {
+      if (!controller.signal.aborted) setDeliveryBusy(false);
+    }
+  }
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1225,19 +1308,34 @@ export function MailDetail({ id }: { id: string }) {
     );
   const c = resource.data;
   const closed = c.revoked;
-  const deliveries = c.delivery ?? [];
+  const deliveries = Array.from(
+    new Map(
+      [...(c.delivery ?? []), ...olderDeliveries].map((d) => [d.id, d]),
+    ).values(),
+  );
+  const deliveryTotal = Object.values(c.delivery_counts ?? {}).reduce(
+    (a, b) => a + b,
+    0,
+  );
   const attention = deliveries.filter((d) =>
     ["failed", "uncertain"].includes(d.state),
   );
+  const attentionCount = c.delivery_counts
+    ? (c.delivery_counts.failed ?? 0) + (c.delivery_counts.uncertain ?? 0)
+    : attention.length;
   const history = deliveries.filter(
     (d) => !["failed", "uncertain"].includes(d.state),
   );
-  const accepted = deliveries.filter(
-    (d) => d.state === "provider_accepted",
-  ).length;
-  const pendingDelivery = deliveries.filter((d) =>
-    ["queued", "retry", "sending"].includes(d.state),
-  ).length;
+  const accepted =
+    c.delivery_counts?.provider_accepted ??
+    deliveries.filter((d) => d.state === "provider_accepted").length;
+  const pendingDelivery = c.delivery_counts
+    ? ["queued", "retry", "sending"].reduce(
+        (n, state) => n + (c.delivery_counts?.[state] ?? 0),
+        0,
+      )
+    : deliveries.filter((d) => ["queued", "retry", "sending"].includes(d.state))
+        .length;
 
   return (
     <>
@@ -1382,9 +1480,9 @@ export function MailDetail({ id }: { id: string }) {
                     <strong>{pendingDelivery}</strong> Pending
                   </span>
                 )}
-                {attention.length > 0 && (
+                {attentionCount > 0 && (
                   <span className="error-text">
-                    <strong>{attention.length}</strong> Need attention
+                    <strong>{attentionCount}</strong> Need attention
                   </span>
                 )}
               </div>
@@ -1438,6 +1536,16 @@ export function MailDetail({ id }: { id: string }) {
                     ))}
                   </ol>
                 </details>
+              )}
+              {deliveries.length < deliveryTotal && (
+                <button
+                  disabled={deliveryBusy}
+                  onClick={() => void loadDeliveryHistory()}
+                >
+                  {deliveryBusy
+                    ? "Loading history�"
+                    : "Load older notifications"}
+                </button>
               )}
               <small>
                 Provider acceptance does not prove delivery or reading.

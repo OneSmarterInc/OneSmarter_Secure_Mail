@@ -106,7 +106,7 @@ Restore a copied encrypted backup into an isolated service, use its matching rec
 After root rotation, `recovery_verification_required` remains true across restarts. Old-root snapshots remain available, ordinary retention pruning pauses, and another root rotation is refused. Merely unsealing does not clear this gate. Stop the key service, retrieve the **new secret from its saved custody location**, and run this offline drill (the secret is prompted securely, never supplied as an argument):
 
 ```sh
-python -m backend.keyservice verify-root-recovery --store STORE_PATH --backup-directory BACKUP_DIR --expected-root NEW_ROOT_UUID --destination NEW_ISOLATED_RESTORE_PATH
+python -m backend.keyservice verify-root-recovery --store STORE_PATH --backup-directory BACKUP_DIR --expected-root NEW_ROOT_UUID --destination NEW_ISOLATED_RESTORE_PATH --trusted-checkpoint INDEPENDENT_CHECKPOINT_PATH
 ```
 
 The command requires exclusive store ownership. It unseals the live store with the new secret, creates an encrypted recovery-proof backup, and restores it to a new destination using the actual restore implementation, checking integrity, audit history and every private key. Only after success does it record verification and retire committed managed snapshots protected by older roots. Wrong secrets, failed restores or interruptions before verification leave old-root backups retained. Unreconciled `.pending` files are never retired by this command. Restart the service and unseal normally afterward.
@@ -162,7 +162,7 @@ independently anchored checkpoints and protected off-host backups remain require
 Restore to a new path only:
 
 ```sh
-python -m backend.keyservice restore --backup /backup/snapshot.sqlite3 --destination /recovery/new-store.sqlite3
+python -m backend.keyservice restore --backup /backup/snapshot.sqlite3 --destination /recovery/new-store.sqlite3 --trusted-checkpoint /custody/approved-checkpoint.json
 ```
 
 The CLI prompts for the matching off-host secret, checks SQLite integrity, audit
@@ -183,3 +183,16 @@ operator approval remain unresolved.
 ## P3 hardening update
 
 See [P3_REMEDIATION.md](P3_REMEDIATION.md) for stable rotation IDs/expected versions, recipient URL cleanup, bounded encrypted-subject search, and deployment verification limits. Rotation retries must reuse the original operation parameters.
+
+## Independently retained audit checkpoints (2026-11-04)
+
+Stop the service for exclusive offline access. From a known-good store, export a new checkpoint and then take its matching backup:
+
+```text
+python -m backend.keyservice checkpoint --store STORE_PATH --destination NEW_CHECKPOINT_PATH
+python -m backend.keyservice backup --store STORE_PATH --destination NEW_BACKUP_PATH
+```
+
+The checkpoint contains an audit sequence and SHA-256 digest, not private keys. Independently approve and retain it off-host, outside the key-service writer's control. Supply a read-only trusted copy with `serve --trusted-checkpoint PATH`; restore and root-recovery verification require that option. A configured missing, invalid or conflicting checkpoint clears the loaded root and denies fresh key operations. Fixing the file alone does not unseal it.
+
+Deliberately advance the retained checkpoint only after validating the new state and backup. Never derive trust from a suspect restored store. This anchor detects whole audit-history rollback through its retained position. It does not attest every database row, prevent selective state rollback with preserved audit history, detect loss after its position, or resist an attacker who can replace the checkpoint too. Omitting the optional synthetic serve setting provides no external rollback protection. See [SECURITY_VALIDATION.md](SECURITY_VALIDATION.md) for remaining custody and deployment gates.

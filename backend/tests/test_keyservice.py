@@ -713,8 +713,18 @@ def test_persistent_connection_checks_seal_and_revocation(live_service):
         runtime.clients.put(lease)
         live["store"].unseal(live["secret"], "test")
         assert not runtime.call("status")["sealed"]
+        version = live["store"].rotate(live["org"], None, str(uuid.uuid4()), "test")
+        context = f"secure-mail:v1:organization={live['org']}:document=pooled-seal"
+        dek = secrets.token_bytes(32)
+        wrapper = live["store"].wrap(live["org"], context, dek, version["id"], "test")
+        payload = {"organization": live["org"], "context": context, "wrapper": wrapper}
+        assert p.decode(runtime.call("unwrap", **payload)["dek"], 32) == dek
         live["store"].seal("test")
         assert runtime.call("status")["sealed"]
+        with pytest.raises(ServiceUnavailable):
+            runtime.call("unwrap", **payload)
+        live["store"].unseal(live["secret"], "test")
+        assert p.decode(runtime.call("unwrap", **payload)["dek"], 32) == dek
         policy = json.loads(live["policy"].read_text())
         del policy["identities"][fingerprint]
         live["policy"].write_text(json.dumps(policy))

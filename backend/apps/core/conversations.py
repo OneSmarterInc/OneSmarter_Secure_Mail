@@ -2,6 +2,7 @@ import secrets
 from datetime import timedelta
 
 from django.conf import settings
+from django.core import signing
 from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponse
@@ -160,7 +161,7 @@ def attachment_data(attachment, name=None):
     }
 
 
-def summary(conversation, subject=None):
+def summary(conversation, subject=None, grants=None):
     return {
         "id": str(conversation.pk),
         "subject": subject
@@ -186,7 +187,7 @@ def summary(conversation, subject=None):
                 "revoked": bool(g.revoked_at),
                 "last_opened": g.last_opened,
             }
-            for g in conversation.grants.all()
+            for g in (conversation.grants.all() if grants is None else grants)
         ],
     }
 
@@ -206,10 +207,11 @@ def staff_visible_messages(query):
     return query
 
 
-def safe_headers(message, viewer):
+def safe_headers(message, viewer, grants=None):
     header = dict(message.mail_headers)
     if not header:
-        grants = list(message.conversation.grants.all())
+        if grants is None:
+            grants = list(message.conversation.grants.all())
         header = {
             "from_name": message.staff.display_name if message.staff else message.grant.email,
             "from_email": message.conversation.sender if message.staff else message.grant.email,
@@ -222,7 +224,11 @@ def safe_headers(message, viewer):
     return header
 
 
-def detail(conversation, grant=None):
+def detail(conversation, grant=None, request=None):
+    # Reuse this authorized conversation's recipients for all historical headers.
+    # select_related creates separate conversation objects per message, so fetching
+    # through message.conversation otherwise issues one query per missing header.
+    grants = list(conversation.grants.all())
     messages = (
         conversation.messages.select_related("staff", "grant", "conversation")
         .prefetch_related("attachments")
@@ -232,7 +238,35 @@ def detail(conversation, grant=None):
         messages = visible_messages(messages, grant)
     else:
         messages = staff_visible_messages(messages)
-    messages = list(messages)
+    next_cursor = None
+    if request is not None:
+        scope = f"{conversation.pk}:{grant.pk if grant else 'staff'}"
+        cursor = request.query_params.get("before", "")
+        if cursor:
+            try:
+                value = signing.loads(cursor, salt="message-page", max_age=86400)
+                if value["scope"] != scope:
+                    raise ValueError("Wrong cursor scope")
+                from datetime import datetime
+                from uuid import UUID
+
+                date, ident = datetime.fromisoformat(value["date"]), UUID(value["id"])
+                messages = messages.filter(
+                    Q(created_at__lt=date) | Q(created_at=date, id__lt=ident)
+                )
+            except (signing.BadSignature, ValueError, KeyError, TypeError):
+                raise Problem("Invalid or expired history cursor.", "invalid_cursor") from None
+        page = list(messages.order_by("-created_at", "-id")[:51])
+        messages = page[:50]
+        if len(page) > 50:
+            last = messages[-1]
+            next_cursor = signing.dumps(
+                {"scope": scope, "date": last.created_at.isoformat(), "id": str(last.pk)},
+                salt="message-page",
+            )
+        messages.reverse()
+    else:
+        messages = list(messages)
     files = [a for m in messages for a in m.attachments.all()]
     values = [(conversation.subject_ciphertext, subject_context(conversation))]
     values.extend((m.body_ciphertext, message_context(m)) for m in messages)
@@ -243,7 +277,7 @@ def detail(conversation, grant=None):
     bodies = dict(zip((m.pk for m in messages), decoded[1 : 1 + len(messages)], strict=True))
     names = dict(zip((a.pk for a in files), decoded[1 + len(messages) :], strict=True))
     data = (
-        summary(conversation, decoded[0])
+        summary(conversation, decoded[0], grants)
         if grant is None
         else {
             "id": str(conversation.pk),
@@ -253,10 +287,11 @@ def detail(conversation, grant=None):
             "state": conversation.state,
         }
     )
-    data["can_reply_all"] = conversation.grants.filter(revoked_at=None).count() > 1 and (
+    data["can_reply_all"] = sum(g.revoked_at is None for g in grants) > 1 and (
         grant is None or grant.kind != "bcc"
     )
     data["viewer_email"] = grant.email if grant else conversation.sender
+    data["next_messages_cursor"] = next_cursor
     data["messages"] = [
         {
             "id": str(m.pk),
@@ -264,7 +299,7 @@ def detail(conversation, grant=None):
             if m.staff
             else ("You" if grant and m.grant_id == grant.pk else m.grant.email),
             "author_type": "staff" if m.staff else "recipient",
-            "headers": safe_headers(m, grant),
+            "headers": safe_headers(m, grant, grants),
             "reply_to": str(m.reply_to_message_id) if m.reply_to_message_id else None,
             "shared": m.shared,
             "audience": str(m.audience_id) if m.audience_id else None,
@@ -275,11 +310,41 @@ def detail(conversation, grant=None):
         for m in messages
     ]
     if not grant:
+        from django.db.models import Count
+
+        data["delivery_counts"] = dict(
+            conversation.delivery_jobs.values_list("state").annotate(total=Count("pk"))
+        )
         data["delivery"] = [
             {"id": str(j.pk), "state": j.state, "attempts": j.attempts, "error_code": j.error_code}
-            for j in conversation.delivery_jobs.all()
+            for j in conversation.delivery_jobs.order_by("-created_at", "id")[:100]
         ]
     return data
+
+
+@endpoint(["GET"], staff=True)
+def delivery_history(request, ident):
+    conversation = owned(request, ident)
+    rows, meta = paginate(
+        conversation.delivery_jobs.all(),
+        request,
+        ordering={"created_at": "created_at"},
+        default="-created_at",
+    )
+    return Response(
+        {
+            "results": [
+                {
+                    "id": str(row.pk),
+                    "state": row.state,
+                    "attempts": row.attempts,
+                    "error_code": row.error_code,
+                }
+                for row in rows
+            ],
+            **meta,
+        }
+    )
 
 
 def policy(user, data):
@@ -334,7 +399,7 @@ def route_preview(request):
     return Response({"protected": decision.protected, "reason": decision.reason})
 
 
-def attach_files(message, ids, *, user=None, grant=None):
+def attach_files(message, ids, *, user=None, grant=None, prepared=None):
     if len(set(ids)) != len(ids):
         raise Problem("An attachment was listed more than once.")
     files = list(
@@ -357,9 +422,17 @@ def attach_files(message, ids, *, user=None, grant=None):
     # New object keys preserve staged objects if this transaction rolls back; cleanup removes orphans.
     for attachment in files:
         staged_key = attachment.object_key
-        plaintext = crypto.decrypt(
-            storage.get(attachment.object_key).decode(), attachment_context(attachment)
-        )
+        from .attachment_preparation import fingerprint
+
+        cached = (prepared or {}).get(str(attachment.pk))
+        if cached is not None:
+            if cached[0] != fingerprint(attachment):
+                raise Problem("Staged attachment changed. Please retry.", "attachment_changed", 409)
+            plaintext = cached[1]
+        else:
+            plaintext = crypto.decrypt(
+                storage.get(attachment.object_key).decode(), attachment_context(attachment)
+            )
         from .evidence import capture_attachment
 
         capture_attachment(attachment, plaintext)
@@ -421,6 +494,9 @@ def conversations(request):
         return Response({"results": [summary(c, subjects[c.pk]) for c in items], **meta})
     document_service.require_ready()
     data = validate(Compose, request.data)
+    from .attachment_preparation import prepare
+
+    prepared = prepare(data["attachments"], user=user)
     with transaction.atomic():
         lock_organization(user.organization_id)
         user = current_staff(request)
@@ -445,7 +521,7 @@ def conversations(request):
         if decision.protected:
             from .direct_chats import compose_secure
 
-            result = compose_secure(user, data, decision, record)
+            result = compose_secure(user, data, decision, record, prepared=prepared)
             document_service.require_ready()
             return Response(result, status=201)
 
@@ -467,7 +543,7 @@ def conversations(request):
         message = Message(conversation=conversation, staff=user)
         message.body_ciphertext = crypto.encrypt(data["body"].encode(), message_context(message))
         message.save()
-        attach_files(message, data["attachments"], user=user)
+        attach_files(message, data["attachments"], user=user, prepared=prepared)
         seen = set()
         for kind in ["to", "cc", "bcc"]:
             for address in data[kind]:
@@ -526,7 +602,7 @@ def conversation_detail(request, ident):
         conversation.pk,
     )
     Conversation.objects.filter(pk=conversation.pk).update(last_staff_read=timezone.now())
-    return Response(detail(conversation))
+    return Response(detail(conversation, request=request))
 
 
 @endpoint(["POST"], staff=True)
@@ -577,6 +653,9 @@ def revoke(request, ident):
 
 def save_reply(request, conversation, data, *, user=None, grant=None):
     document_service.require_ready()
+    from .attachment_preparation import prepare
+
+    prepared = prepare(data["attachments"], user=user, grant=grant)
     with transaction.atomic():
         lock_organization(conversation.organization_id)
         if user:
@@ -661,7 +740,7 @@ def save_reply(request, conversation, data, *, user=None, grant=None):
         )
         message.body_ciphertext = crypto.encrypt(data["body"].encode(), message_context(message))
         message.save()
-        attach_files(message, data["attachments"], user=user, grant=grant)
+        attach_files(message, data["attachments"], user=user, grant=grant, prepared=prepared)
         conversation.state = "replied" if grant else "awaiting_recipient"
         conversation.updated_at = timezone.now()
         conversation.save(update_fields=["state", "updated_at"])
@@ -887,7 +966,7 @@ def recipient_conversation(request):
             "conversation",
             grant.conversation_id,
         )
-        return Response(detail(grant.conversation, grant))
+        return Response(detail(grant.conversation, grant, request=request))
     data = validate(Reply, request.data)
     if data.get("audience"):
         raise Problem("Recipient replies are private to assigned staff.")
@@ -1061,17 +1140,20 @@ def download(request, ident):
         actor = grant.pk
     # Recipient authorization above enforces expiry/revocation. Assigned staff may
     # still read retained records; ending recipient access is not data deletion.
-    content = crypto.decrypt(
-        storage.get(attachment.object_key).decode(), attachment_context(attachment)
+    content, name_bytes = crypto.decrypt_many(
+        [
+            (storage.get(attachment.object_key).decode(), attachment_context(attachment)),
+            (
+                attachment.name_ciphertext,
+                crypto.context(attachment.organization_id, "filename", attachment.pk),
+            ),
+        ]
     )
     from .integrity import matches
 
     if attachment.sha256 and not matches(attachment.organization_id, content, attachment.sha256):
         raise Problem("File integrity verification failed.", "integrity_failed", 503)
-    name = crypto.decrypt(
-        attachment.name_ciphertext,
-        crypto.context(attachment.organization_id, "filename", attachment.pk),
-    ).decode()
+    name = name_bytes.decode()
     audit(conversation.organization_id, actor, "attachment.downloaded", "attachment", attachment.pk)
     response = HttpResponse(content, content_type="application/octet-stream")
     response["Content-Disposition"] = content_disposition_header(True, name)

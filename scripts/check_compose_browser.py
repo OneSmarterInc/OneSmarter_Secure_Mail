@@ -19,6 +19,7 @@ def main():
     setup, inbox = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     env = {
         **os.environ,
+        "APP_ENV": "test",
         "CI_DB_PASSWORD": secrets.token_urlsafe(32),
         "SETUP_TOKEN_SHA256": hashlib.sha256(setup.encode()).hexdigest(),
         "DEV_INBOX_TOKEN_SHA256": hashlib.sha256(inbox.encode()).hexdigest(),

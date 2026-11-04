@@ -68,6 +68,7 @@ def process_job(job_id, *, service_ready=None):
             return
         data = payload(job)
         from .portal import delivery_allowed
+
         if not delivery_allowed(data, job):
             job.state, job.error_code = "cancelled", "portal_delivery_suppressed"
             job.payload_ciphertext = ""
@@ -146,7 +147,9 @@ def process_job(job_id, *, service_ready=None):
                 raise senders.SenderUnavailable("No authorized staff SMTP identity")
             sender, smtp_connection = (
                 smtp_settings.otp_connection(owner)
-                if data.get("challenge_id") or data.get("portal_challenge_id") or data.get("portal_thread")
+                if data.get("challenge_id")
+                or data.get("portal_challenge_id")
+                or data.get("portal_thread")
                 else smtp_settings.connection(owner)
             )
             if ordinary and (

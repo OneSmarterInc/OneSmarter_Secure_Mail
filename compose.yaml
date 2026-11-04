@@ -3,7 +3,7 @@ name: onesmarter-secure-mail
 x-app: &app
   build: .
   environment: &environment
-    APP_ENV: development
+    APP_ENV: development # Explicit synthetic-only Compose profile; never inferred by Django.
     DOCUMENT_INTEGRITY_KEY: ${DOCUMENT_INTEGRITY_KEY:?Run python scripts/init_compose.py first}
     POSTGRES_HOST: db
     POSTGRES_DB: secure_mail

@@ -19,7 +19,7 @@ jobs:
           docker run --rm --user root -v "$PWD:/app" -e APP_ENV -e RUN_PQ_TRANSPORT -e RUN_KEY_SERVICE_LOAD securemail-pq-test sh -ec '
             python scripts/init_local.py
             python scripts/check_pq_transport.py
-            pytest backend/tests/test_keyservice.py backend/tests/test_pq_transport.py -q
+            pytest backend/tests/test_keyservice.py backend/tests/test_pq_transport.py backend/tests/test_security_acceptance.py -q
             cat .runtime/key-service-load.json
           '
   proxy:
@@ -90,6 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      APP_ENV: test
       E2E_BROWSER: chromium
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

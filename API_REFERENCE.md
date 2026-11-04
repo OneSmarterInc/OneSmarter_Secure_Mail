@@ -126,3 +126,12 @@ The `/recipient/inbox?source=selfpay` UI uses the existing recipient cookie boun
 | POST | `/recipient-api/inbox/logout` | Revoke mailbox session and clear cookie |
 
 Mailbox sessions are separate from invitation/grant sessions and from staff authentication. Existing recipient invitation endpoints retain their original one-conversation authorization scope. Mailbox verification authorizes active memberships in that organization, not arbitrary threads, other mailboxes, other organizations or staff actions.
+
+
+### Bounded conversation history and recipient documents
+
+`GET /api/conversations/{id}` and `GET /recipient-api/recipient/conversation` return at most 50 visible messages (ascending within the latest page). `next_messages_cursor` is null at the end; otherwise pass its opaque value as `?before=...` to load the next older page. A cursor is bound to the conversation and recipient grant (or staff view), valid for 24 hours, and never substitutes for current authorization. Invalid cursors return 400. Invitation links remain non-expiring under the existing product policy.
+
+Staff conversation responses include the newest 100 delivery records plus `delivery_counts` by state. Older records are available at `GET /api/conversations/{id}/delivery?page=2&page_size=100`, with normal owner authorization and pagination metadata.
+
+`GET /recipient-api/recipient/documents?q=...&sort=-date&page=1&page_size=25` lists available attachments in messages visible to the verified recipient, independently of the loaded message page. Sort fields are `date` and `sender`; filenames use keyed-token search. Each result includes attachment `id`, decrypted `name`, `sender`, message `date`, and `state`; downloads use the existing authorized attachment endpoint. No other conversation or private audience is included.

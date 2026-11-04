@@ -2,6 +2,8 @@ import json
 from unittest.mock import Mock
 
 import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 
 from backend.apps.core import conversations, crypto, keyring
 from backend.apps.core.models import Attachment, Conversation, Message, MetadataToken
@@ -9,6 +11,27 @@ from backend.keyservice import protocol
 from backend.tests.test_flows import compose
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.mark.parametrize("message_count", [10, 100])
+def test_historical_headers_have_constant_query_cost(staff_client, monkeypatch, message_count):
+    conversation = Conversation.objects.get(pk=compose(staff_client).json()["id"])
+    Message.objects.bulk_create(
+        [
+            Message(
+                conversation=conversation, staff=conversation.owner, body_ciphertext="synthetic"
+            )
+            for _ in range(message_count - 1)
+        ]
+    )
+    # Isolate ORM/serialization cost; real decryption and authorization are
+    # covered by the batch and recipient-visibility regressions.
+    monkeypatch.setattr(crypto, "decrypt_many", lambda values: [b"synthetic"] * len(values))
+    with CaptureQueriesContext(connection) as queries:
+        result = conversations.detail(conversation)
+    assert len(result["messages"]) == message_count
+    assert len(queries) <= 5
+    assert all(m["headers"]["from_email"] == conversation.sender for m in result["messages"])
 
 
 def test_thread_batches_only_visible_content(staff_client, monkeypatch):

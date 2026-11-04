@@ -25,9 +25,21 @@ from .portal_models import PortalMailbox, PortalMessage, PortalThread
 
 def envelopes(org):
     specs = [
-        (PortalMailbox.objects.filter(organization=org), "email_ciphertext", lambda x: crypto.context(org.pk, "portal-email", x.pk)),
-        (PortalThread.objects.filter(organization=org), "metadata_ciphertext", lambda x: crypto.context(org.pk, "portal-thread", x.pk)),
-        (PortalMessage.objects.filter(thread__organization=org), "body_ciphertext", lambda x: crypto.context(org.pk, "portal-message", x.pk)),
+        (
+            PortalMailbox.objects.filter(organization=org),
+            "email_ciphertext",
+            lambda x: crypto.context(org.pk, "portal-email", x.pk),
+        ),
+        (
+            PortalThread.objects.filter(organization=org),
+            "metadata_ciphertext",
+            lambda x: crypto.context(org.pk, "portal-thread", x.pk),
+        ),
+        (
+            PortalMessage.objects.filter(thread__organization=org),
+            "body_ciphertext",
+            lambda x: crypto.context(org.pk, "portal-message", x.pk),
+        ),
         (
             EvidenceCapture.objects.filter(organization=org),
             "metadata_ciphertext",

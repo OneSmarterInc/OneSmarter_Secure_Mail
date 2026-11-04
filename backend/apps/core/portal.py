@@ -340,8 +340,17 @@ def session_status(request):
     except Problem:
         return Response({"csrf": get_token(request), "verified": False})
     return Response(
-        {"csrf": get_token(request), "verified": True, "expires_at": session.expires_at.isoformat(),
-         "email": decrypt(session.mailbox.email_ciphertext, session.mailbox.organization_id, "portal-email", session.mailbox_id)}
+        {
+            "csrf": get_token(request),
+            "verified": True,
+            "expires_at": session.expires_at.isoformat(),
+            "email": decrypt(
+                session.mailbox.email_ciphertext,
+                session.mailbox.organization_id,
+                "portal-email",
+                session.mailbox_id,
+            ),
+        }
     )
 
 
@@ -606,13 +615,27 @@ def thread_detail(request, ident):
             thread.pk,
         )
         participants = [
-            {"name": info["names"].get(str(person.mailbox_id), "Participant"),
-             "email": decrypt(person.mailbox.email_ciphertext, thread.organization_id, "portal-email", person.mailbox_id),
-             "mine": person.mailbox_id == session.mailbox_id, "role": person.role}
-            for person in thread.participants.filter(revoked_at=None, mailbox__disabled_at=None).select_related("mailbox")
+            {
+                "name": info["names"].get(str(person.mailbox_id), "Participant"),
+                "email": decrypt(
+                    person.mailbox.email_ciphertext,
+                    thread.organization_id,
+                    "portal-email",
+                    person.mailbox_id,
+                ),
+                "mine": person.mailbox_id == session.mailbox_id,
+                "role": person.role,
+            }
+            for person in thread.participants.filter(
+                revoked_at=None, mailbox__disabled_at=None
+            ).select_related("mailbox")
         ]
         initial = thread.messages.filter(sender=None, submission_key="initial").first()
-        request_summary = decrypt(initial.body_ciphertext, thread.organization_id, "portal-message", initial.pk) if initial else ""
+        request_summary = (
+            decrypt(initial.body_ciphertext, thread.organization_id, "portal-message", initial.pk)
+            if initial
+            else ""
+        )
         return Response(
             {
                 "id": str(thread.pk),
