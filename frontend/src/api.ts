@@ -5,33 +5,62 @@ export const recipientPortal =
 export const apiBase = recipientPortal ? "/recipient-api" : "/api";
 let csrf = "";
 
-export function useDocumentService() {
-  // Unknown while the first request is pending; this is not a service outage.
-  const [ready, setReady] = useState<boolean | null>(null);
-  useEffect(() => {
-    let live = true;
-    let timer: ReturnType<typeof setTimeout>;
-    const controller = new AbortController();
-    async function refresh() {
-      try {
-        const result = await api<{ ready: boolean }>("/document-service", {
-          signal: AbortSignal.any([
-            controller.signal,
-            AbortSignal.timeout(5000),
-          ]),
-        });
-        if (live) setReady(result.ready === true);
-      } catch {
-        if (live) setReady(false);
-      } finally {
-        if (live) timer = setTimeout(() => void refresh(), 5000);
+// Shared display status only. Every protected server operation still checks custody.
+let serviceStatus: boolean | null = null;
+const serviceListeners = new Set<(value: boolean | null) => void>();
+let stopServiceStatus: (() => void) | null = null;
+function startServiceStatus() {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let active = true;
+  let pending = false;
+  const controller = new AbortController();
+  async function refresh() {
+    if (!active || document.hidden || pending) return;
+    clearTimeout(timer);
+    pending = true;
+    try {
+      const result = await api<{ ready: boolean }>("/document-service", {
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]),
+      });
+      if (active) serviceStatus = result.ready === true;
+    } catch {
+      if (active) serviceStatus = false;
+    } finally {
+      pending = false;
+      if (active) {
+        serviceListeners.forEach((listener) => listener(serviceStatus));
+        timer = setTimeout(() => void refresh(), 15000);
       }
     }
-    void refresh();
+  }
+  const visible = () => {
+    if (!document.hidden) void refresh();
+    else clearTimeout(timer);
+  };
+  document.addEventListener("visibilitychange", visible);
+  window.addEventListener("focus", visible);
+  void refresh();
+  return () => {
+    active = false;
+    controller.abort();
+    clearTimeout(timer);
+    document.removeEventListener("visibilitychange", visible);
+    window.removeEventListener("focus", visible);
+    serviceStatus = null;
+  };
+}
+export function useDocumentService() {
+  const [ready, setReady] = useState<boolean | null>(serviceStatus);
+  useEffect(() => {
+    serviceListeners.add(setReady);
+    if (!stopServiceStatus) stopServiceStatus = startServiceStatus();
+    setReady(serviceStatus);
     return () => {
-      live = false;
-      controller.abort();
-      clearTimeout(timer);
+      serviceListeners.delete(setReady);
+      if (!serviceListeners.size) {
+        stopServiceStatus?.();
+        stopServiceStatus = null;
+      }
     };
   }, []);
   return ready;

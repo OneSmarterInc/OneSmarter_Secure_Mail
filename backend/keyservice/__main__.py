@@ -28,6 +28,10 @@ def main():
     restore = commands.add_parser("restore")
     restore.add_argument("--backup", type=Path, required=True)
     restore.add_argument("--destination", type=Path, required=True)
+    restore.add_argument("--trusted-checkpoint", type=Path, required=True)
+    checkpoint = commands.add_parser("checkpoint")
+    checkpoint.add_argument("--store", type=Path, required=True)
+    checkpoint.add_argument("--destination", type=Path, required=True)
     backup = commands.add_parser("backup")
     backup.add_argument("--store", type=Path, required=True)
     backup.add_argument("--destination", type=Path, required=True)
@@ -36,6 +40,7 @@ def main():
     verify.add_argument("--backup-directory", type=Path, required=True)
     verify.add_argument("--destination", type=Path, required=True)
     verify.add_argument("--expected-root", required=True)
+    verify.add_argument("--trusted-checkpoint", type=Path, required=True)
     identity = commands.add_parser("identity")
     identity.add_argument("--policy", type=Path, required=True)
     identity.add_argument("--cert", type=Path, required=True)
@@ -45,6 +50,7 @@ def main():
     identity.add_argument("--days", type=int, default=30)
     serve = commands.add_parser("serve")
     serve.add_argument("--store", type=Path, required=True)
+    serve.add_argument("--trusted-checkpoint", type=Path)
     serve.add_argument("--backup-directory", type=Path, required=True)
     serve.add_argument("--policy", type=Path, required=True)
     serve.add_argument("--cert", required=True)
@@ -97,16 +103,21 @@ def main():
         print("Initialized sealed store. Keep recovery custody independent of this host.")
     elif args.command == "restore":
         secret = p.decode(getpass.getpass("Off-host backup recovery secret: "), 32)
-        KeyStore.restore(args.backup, args.destination, secret)
+        KeyStore.restore(
+            args.backup, args.destination, secret, trusted_checkpoint=args.trusted_checkpoint
+        )
         print("Verified backup restored to a new SEALED store; original backup preserved.")
+    elif args.command == "checkpoint":
+        KeyStore(args.store).export_checkpoint(args.destination)
+        print("Checkpoint exported. Verify and retain it outside the key host trust boundary.")
     elif args.command == "backup":
         KeyStore(args.store).backup(args.destination)
         print("Created encrypted SQLite backup. Retain its matching recovery secret separately.")
     elif args.command == "verify-root-recovery":
         secret = p.decode(getpass.getpass("New recovery secret retrieved from custody: "), 32)
-        result = KeyStore(args.store, args.backup_directory).verify_root_recovery(
-            secret, args.expected_root, args.destination, "offline-custodian"
-        )
+        result = KeyStore(
+            args.store, args.backup_directory, trusted_checkpoint=args.trusted_checkpoint
+        ).verify_root_recovery(secret, args.expected_root, args.destination, "offline-custodian")
         print(json.dumps(result))
     elif args.command == "identity":
         if not 1 <= args.days <= 90:
@@ -147,7 +158,9 @@ def main():
         tmp.replace(args.policy)
         print("Identity registered. Policy is reloaded on every service request.")
     else:
-        store = KeyStore(args.store, args.backup_directory)
+        store = KeyStore(
+            args.store, args.backup_directory, trusted_checkpoint=args.trusted_checkpoint
+        )
         if args.allow_http_loopback_origin and args.host not in {"127.0.0.1", "localhost"}:
             parser.error("HTTP development origins require a loopback-only service bind.")
         service = Service(

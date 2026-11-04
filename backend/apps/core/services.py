@@ -147,6 +147,11 @@ def queue_mail(org, payload: dict, *, actor=None, conversation=None, grant=None)
         json.dumps(payload).encode(), crypto.context(org.pk, "delivery", job.pk)
     )
     job.save()
+    if settings.OUTBOX_IMMEDIATE_DISPATCH:
+        from .tasks import wake_delivery
+
+        urgent = bool(payload.get("challenge_id") or payload.get("portal_challenge_id"))
+        transaction.on_commit(lambda: wake_delivery(job.pk, urgent=urgent), robust=True)
     return job
 
 

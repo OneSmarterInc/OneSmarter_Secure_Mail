@@ -10,11 +10,13 @@ from pathlib import Path
 import boto3
 from django.conf import settings
 
+from backend.performance import timed
 from backend.transport import tls
 
 from .http import Problem
 
 
+@timed("storage_write")
 def put(key: str, value: bytes):
     if settings.STORAGE_PROVIDER == "s3":
         boto3.client("s3", region_name=settings.AWS_REGION).put_object(
@@ -41,6 +43,7 @@ def put(key: str, value: bytes):
         raise Problem("Private storage is unavailable.", "storage_unavailable", 503)
 
 
+@timed("storage_read")
 def get(key: str) -> bytes:
     # Object keys are generated internally, never accepted from API callers.
     if settings.STORAGE_PROVIDER == "s3":
@@ -94,6 +97,7 @@ def validate_file(name: str, data: bytes) -> tuple[str, str]:
     return clean, expected[suffix][1]
 
 
+@timed("scanner")
 def scan(data: bytes) -> tuple[bool, str]:
     if not data or len(data) > settings.MAX_UPLOAD_BYTES:
         raise Problem("File size limit exceeded.", "file_size_rejected")

@@ -10,6 +10,7 @@ from pathlib import Path
 from queue import Empty, LifoQueue
 from urllib.parse import urlsplit
 
+from backend.performance import timed
 from backend.transport import tls
 
 from .protocol import canonical, parse_object
@@ -147,6 +148,7 @@ class ClientPool:
         self.waiters = deque()
         self.active = 0
 
+    @timed("key_service")
     def call(self, operation, **data):
         ticket = object()
         with self.admission:

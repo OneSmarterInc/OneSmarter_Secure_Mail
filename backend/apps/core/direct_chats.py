@@ -21,7 +21,15 @@ from .services import audit, digest, queue_mail
 
 
 def compose_private(
-    user, data, decision, record, *, finalize=True, original_headers=None, source_message=None
+    user,
+    data,
+    decision,
+    record,
+    *,
+    finalize=True,
+    original_headers=None,
+    source_message=None,
+    prepared=None,
 ):
     # Called under the existing organisation transaction/lock. The unique pair
     # constraint additionally prevents two competing workers creating duplicate chats.
@@ -110,7 +118,7 @@ def compose_private(
         message.body_ciphertext = crypto.encrypt(body.encode(), message_context(message))
         message.save()
         if first_message is None:
-            attach_files(message, data["attachments"], user=user)
+            attach_files(message, data["attachments"], user=user, prepared=prepared)
             first_message = message
         else:
             # Each private chat owns an independently encrypted attachment; one
@@ -188,7 +196,7 @@ def headers(user, data):
     }
 
 
-def compose_secure(user, data, decision, record):
+def compose_secure(user, data, decision, record, *, prepared=None):
     import hashlib
 
     from .conversations import attach_files, message_context, subject_context
@@ -197,7 +205,9 @@ def compose_secure(user, data, decision, record):
     header = headers(user, data)
     visible = header["to"] + header["cc"]
     if len(visible) <= 1:
-        return compose_private(user, data, decision, record, original_headers=header)
+        return compose_private(
+            user, data, decision, record, original_headers=header, prepared=prepared
+        )
     group_hash = hashlib.sha256("\0".join(sorted(visible)).encode()).hexdigest()
     group = (
         GroupChat.objects.select_related("conversation")
@@ -237,7 +247,7 @@ def compose_secure(user, data, decision, record):
         (data["subject"] + "\n\n" + data["body"]).strip().encode(), message_context(message)
     )
     message.save()
-    attach_files(message, data["attachments"], user=user)
+    attach_files(message, data["attachments"], user=user, prepared=prepared)
     for email in visible:
         token = secrets.token_urlsafe(32)
         kind = "to" if email in header["to"] else "cc"

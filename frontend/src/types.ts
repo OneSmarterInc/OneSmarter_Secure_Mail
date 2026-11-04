@@ -73,7 +73,9 @@ export interface Conversation {
   unread: boolean;
   recipients: Grant[];
   messages?: Message[];
+  next_messages_cursor?: string | null;
   delivery?: Delivery[];
+  delivery_counts?: Record<string, number>;
 }
 export interface Page<T> {
   results: T[];

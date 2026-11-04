@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { downloadAttachment, formatDate } from "../api";
+import {
+  downloadAttachment,
+  formatDate,
+  query,
+  useDebounced,
+  useResource,
+} from "../api";
 import { ErrorNotice, Icon, SortHeader } from "../components/ui";
-import type { Conversation } from "../types";
+import type { Conversation, Page } from "../types";
 
 export function RecipientCatalog({
   conversation,
@@ -14,28 +20,19 @@ export function RecipientCatalog({
   const [downloading, setDownloading] = useState("");
   const request = useRef<AbortController | null>(null);
   useEffect(() => () => request.current?.abort(), []);
-  // Only use the server-filtered messages from this verified conversation.
-  const rows = (conversation.messages ?? [])
-    .flatMap((message) =>
-      message.attachments.map((file) => ({
-        id: file.id,
-        name: file.name,
-        state: file.state,
-        sender: message.headers?.from_email || message.author,
-        date: message.created_at,
-      })),
-    )
-    .filter((row) =>
-      `${row.name} ${row.sender} ${row.date}`
-        .toLowerCase()
-        .includes(search.trim().toLowerCase()),
-    );
-  const field = sort.replace(/^-/, "") as "name" | "sender" | "date";
-  rows.sort(
-    (a, b) =>
-      (sort.startsWith("-") ? -1 : 1) *
-      a[field].localeCompare(b[field], undefined, { numeric: true }),
-  );
+  const [page, setPage] = useState(1);
+  const debounced = useDebounced(search);
+  const resource = useResource<
+    Page<{
+      id: string;
+      name: string;
+      state: string;
+      sender: string;
+      date: string;
+    }>
+  >("/recipient/documents" + query({ q: debounced, sort, page }), 0, true);
+  useEffect(() => setPage(1), [debounced, sort, conversation.id]);
+  const rows = resource.data?.results ?? [];
   async function download(id: string, name: string) {
     const controller = new AbortController();
     request.current = controller;
@@ -55,7 +52,7 @@ export function RecipientCatalog({
         <h1>Archive</h1>
         <p className="muted">Documents shared with you in this conversation.</p>
       </header>
-      <ErrorNotice message={error} />
+      <ErrorNotice message={error || resource.error} />
       <div className="card document-catalog">
         <div className="document-toolbar">
           <label className="document-search">
@@ -72,8 +69,8 @@ export function RecipientCatalog({
         <table className="document-table" aria-label="Conversation documents">
           <thead>
             <tr>
+              <th scope="col">Document name</th>
               {[
-                ["name", "Document name"],
                 ["sender", "Sender"],
                 ["date", "Date / time"],
               ].map(([key, label]) => (
@@ -112,14 +109,35 @@ export function RecipientCatalog({
             {rows.length === 0 && (
               <tr>
                 <td colSpan={4}>
-                  {search
-                    ? "No documents match your search."
-                    : "No documents have been shared in this conversation yet."}
+                  {resource.loading
+                    ? "Loading documents..."
+                    : search
+                      ? "No documents match your search."
+                      : "No documents have been shared in this conversation yet."}
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+        <div className="pagination">
+          <button
+            disabled={page === 1 || resource.loading}
+            onClick={() => setPage(page - 1)}
+          >
+            Previous
+          </button>
+          <span>Page {page}</span>
+          <button
+            disabled={
+              !resource.data ||
+              resource.loading ||
+              page * resource.data.page_size >= resource.data.count
+            }
+            onClick={() => setPage(page + 1)}
+          >
+            Next
+          </button>
+        </div>
       </div>
     </section>
   );

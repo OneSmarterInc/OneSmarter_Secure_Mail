@@ -1,9 +1,21 @@
 from django.urls import path
 
-from backend.apps.core import accounts, audit, auth, evidence, portal, smtp_settings, views
+from backend.apps.core import (
+    accounts,
+    audit,
+    auth,
+    evidence,
+    portal,
+    recipient_documents,
+    smtp_settings,
+    views,
+)
 from backend.apps.core import conversations as mail
 
 urlpatterns = [
+    path("api/conversations/<uuid:ident>/delivery", mail.delivery_history),
+    path("recipient-api/recipient/documents", recipient_documents.documents),
+    path("api/recipient/documents", recipient_documents.documents),
     path("api/integrations/threads", portal.create_thread),
     path("recipient-api/inbox/session", portal.session_status),
     path("recipient-api/inbox/code", portal.request_code),

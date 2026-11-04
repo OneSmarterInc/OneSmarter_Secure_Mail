@@ -80,10 +80,17 @@ def require_synthetic_import() -> None:
 
 
 class KeyStore:
-    def __init__(self, path: Path, backup_directory: Path | None = None):
+    def __init__(
+        self,
+        path: Path,
+        backup_directory: Path | None = None,
+        *,
+        trusted_checkpoint: Path | None = None,
+    ):
         if not path.is_file():
             raise ValueError("Initialize the key store before starting it.")
         self.path = path
+        self.trusted_checkpoint = trusted_checkpoint
         self.backup_directory = backup_directory
         self.lock = threading.RLock()
         self.root: bytes | None = None
@@ -167,9 +174,24 @@ class KeyStore:
                             path
                             for path in self.backup_directory.glob("*.sqlite3")
                             if re.fullmatch(r"[0-9]+-[0-9a-f-]{36}\.sqlite3", path.name)
-                            and self.snapshot_root(path) == current_root
                         )
-                        for obsolete in self.expired_snapshots(committed, time.time_ns()):
+                        now_ns = time.time_ns()
+                        # Nothing within seven days is eligible for removal. Avoid
+                        # reopening every recent database on every rotation. Once
+                        # pruning is possible, preserve the full root-scoped policy.
+                        pruning_possible = any(
+                            now_ns - int(path.name.split("-", 1)[0]) > 7 * 86400 * 1_000_000_000
+                            for path in committed
+                        )
+                        obsolete_paths = []
+                        if pruning_possible:
+                            current = [
+                                path
+                                for path in committed
+                                if self.snapshot_root(path) == current_root
+                            ]
+                            obsolete_paths = self.expired_snapshots(current, now_ns)
+                        for obsolete in obsolete_paths:
                             if obsolete.is_symlink():
                                 raise OSError("Refusing symlink snapshot")
                             obsolete.unlink()
@@ -189,7 +211,62 @@ class KeyStore:
             finally:
                 db.close()
 
+    def check_trusted_checkpoint(self, db):
+        """Verify an independently held audit anchor; never update it from runtime.
+
+        This detects history rollback/forks through the anchor, not arbitrary host
+        compromise or loss of events newer than the last external checkpoint.
+        """
+        if self.trusted_checkpoint is None:
+            return
+        try:
+            with self.trusted_checkpoint.open("rb") as stream:
+                raw = stream.read(4097)
+            if len(raw) > 4096:
+                raise ValueError("Oversized checkpoint")
+            anchor = p.parse_object(raw)
+            if (
+                set(anchor) != {"format", "seq", "digest"}
+                or type(anchor["format"]) is not int
+                or anchor["format"] != 1
+                or type(anchor["seq"]) is not int
+                or anchor["seq"] < 1
+                or not isinstance(anchor["digest"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", anchor["digest"])
+            ):
+                raise ValueError("Invalid trusted checkpoint")
+            row = db.execute(
+                "SELECT body,digest FROM audit WHERE seq=?", (anchor["seq"],)
+            ).fetchone()
+            if (
+                row is None
+                or not secrets.compare_digest(row["digest"], anchor["digest"])
+                or hashlib.sha256(row["body"].encode()).hexdigest() != anchor["digest"]
+            ):
+                raise ValueError("Key-store history predates or conflicts with trusted checkpoint")
+        except (OSError, ValueError, TypeError, KeyError):
+            self.root = self.root_id = self.seal_epoch = None
+            self.audit_integrity = "failed"
+            raise
+
+    def export_checkpoint(self, destination: Path):
+        """Offline capture only; operator must independently protect the result."""
+        with self.transaction() as db:
+            self.verify_audit(db)
+            self.check_trusted_checkpoint(db)
+            row = db.execute("SELECT seq,digest FROM audit ORDER BY seq DESC LIMIT 1").fetchone()
+            if row is None:
+                raise ValueError("An empty audit history cannot establish a checkpoint")
+            encoded = p.canonical({"format": 1, "seq": row["seq"], "digest": row["digest"]})
+            with os.fdopen(
+                os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"
+            ) as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+
     def _refresh_seal(self, db):
+        self.check_trusted_checkpoint(db)
         current = db.execute("SELECT value FROM meta WHERE name='root_id'").fetchone()[0]
         epoch = db.execute("SELECT value FROM meta WHERE name='seal_epoch'").fetchone()
         epoch = epoch[0] if epoch else "0"
@@ -248,6 +325,7 @@ class KeyStore:
             with self.transaction() as db:
                 try:
                     self.verify_audit(db)
+                    self.check_trusted_checkpoint(db)
                 except (ValueError, TypeError):
                     self.root = self.root_id = self.seal_epoch = None
                     self.audit_integrity = "failed"
@@ -579,7 +657,9 @@ class KeyStore:
                 self.backup(proof)
                 # Uses the actual restore path: integrity, audit, root and every
                 # private key are verified, then a standalone sealed DB is published.
-                restored = self.restore(proof, destination, secret)
+                restored = self.restore(
+                    proof, destination, secret, trusted_checkpoint=self.trusted_checkpoint
+                )
                 if self.snapshot_root(restored.path) != expected:
                     raise ConflictError("Restored root differs from the live root")
                 with self.transaction() as db:
@@ -683,7 +763,14 @@ class KeyStore:
         self.pending_snapshots.append(destination)
 
     @classmethod
-    def restore(cls, source: Path, destination: Path, secret: bytes):
+    def restore(
+        cls,
+        source: Path,
+        destination: Path,
+        secret: bytes,
+        *,
+        trusted_checkpoint: Path | None = None,
+    ):
         """Restore only to a new path, verifying custody and every private record."""
         if source.suffix == ".pending":
             raise ValueError("Uncommitted snapshot requires reconciliation; restore refused")
@@ -702,7 +789,7 @@ class KeyStore:
                 if original.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise ValueError("Backup integrity failed")
                 original.backup(target)
-            recovered = cls(temporary)
+            recovered = cls(temporary, trusted_checkpoint=trusted_checkpoint)
             recovered.unseal(secret, "offline-restore-verification")
             recovered.seal("offline-restore-complete")
             # Publish a standalone database, never a main file with pending WAL.
@@ -719,7 +806,7 @@ class KeyStore:
                 os.link(temporary, destination)
         finally:
             temporary.unlink(missing_ok=True)
-        return cls(destination)
+        return cls(destination, trusted_checkpoint=trusted_checkpoint)
 
     def backup(self, destination: Path):
         """Offline CLI operation; backup is encrypted and never returned over runtime API."""

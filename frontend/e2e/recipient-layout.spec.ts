@@ -8,10 +8,59 @@ test("recipient chat matches staff layout and preserves collapsed drafts", async
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith("/auth/session"))
       return route.fulfill({ json: { user: null, csrf: "test" } });
+    if (path.endsWith("/documents")) {
+      const empty =
+        new URL(route.request().url()).searchParams.get("q") === "missing";
+      return route.fulfill({
+        json: {
+          count: empty ? 0 : 1,
+          page: 1,
+          page_size: 25,
+          results: empty
+            ? []
+            : [
+                {
+                  id: "visible-file",
+                  name: "Shared.pdf",
+                  state: "available",
+                  sender: "sara@example.com",
+                  date: "2026-01-01T12:11:00Z",
+                },
+              ],
+        },
+      });
+    }
+    if (
+      path.endsWith("/conversation") &&
+      new URL(route.request().url()).searchParams.has("before")
+    )
+      return route.fulfill({
+        json: {
+          id: "thread",
+          next_messages_cursor: null,
+          messages: [
+            {
+              id: "older",
+              author: "Staff",
+              author_type: "staff",
+              body: "Older protected message",
+              created_at: "2025-12-31T12:00:00Z",
+              attachments: [],
+              headers: {
+                from_email: "staff@example.com",
+                to: [],
+                cc: [],
+                bcc: [],
+              },
+            },
+          ],
+        },
+      });
     if (path.endsWith("/conversation"))
       return route.fulfill({
         json: {
           id: "thread",
+          next_messages_cursor: "synthetic-cursor",
           subject: "Shared documents",
           protected: true,
           can_reply_all: true,
@@ -82,6 +131,14 @@ test("recipient chat matches staff layout and preserves collapsed drafts", async
     "Keep my recipient draft",
   );
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Load older messages" }).click();
+  await expect(
+    page.getByText("Older protected message", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Load older messages" }),
+  ).toHaveCount(0);
+
   await page
     .getByRole("button", { name: "Reply to staff", exact: true })
     .first()
